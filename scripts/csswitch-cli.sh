@@ -13,6 +13,7 @@ HELPER="$PROJ/scripts/csswitch_config_helper.py"
 LAUNCH="$PROJ/scripts/launch-virtual-sandbox.sh"
 STOP="$PROJ/scripts/stop-science-sandbox.sh"
 DOCTOR="$PROJ/scripts/doctor.sh"
+WATCHDOG="$PROJ/scripts/proxy-watchdog.sh"
 
 CSSWITCH_DIR="${CSSWITCH_DIR:-$HOME/.csswitch}"
 SANDBOX_HOME="${SANDBOX_HOME:-$CSSWITCH_DIR/sandbox/home}"
@@ -195,13 +196,15 @@ do_start() {
     run_helper set-secret --secret "$secret" >/dev/null
   fi
 
-  # Kill old proxy on same port.
+  # Kill old proxy watchdog + proxy on same port.
   local script="$PROJ/proxy/csswitch_proxy.py"
   local script_rex
   script_rex=$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "$script")
   pkill -f "${script_rex}.*--port ${proxy_port}" || true
+  pkill -f "proxy-watchdog.*--port ${proxy_port}" 2>/dev/null || true
+  sleep 0.3
 
-  msg "启动代理 (adapter=$adapter, port=$proxy_port)..."
+  msg "启动代理 (adapter=$adapter, port=$proxy_port, 带保活)..."
   local env_vars=("$key_env=$key")
   if [[ "$adapter" == "relay" ]]; then
     [[ -n "$base_url" ]] && env_vars+=("CSSWITCH_RELAY_BASE_URL=$base_url")
@@ -212,11 +215,14 @@ do_start() {
   fi
 
   mkdir -p "$CSSWITCH_DIR/logs"
-  nohup env "${env_vars[@]}" python3 "$script" \
-    --provider "$adapter" \
-    --port "$proxy_port" \
-    --auth-token "$secret" \
-    >> "$CSSWITCH_DIR/logs/proxy-cli.log" 2>&1 &
+  # 用 watchdog 包装代理：进程崩溃后自动重启（指数退避，最多 50 次）
+  PROXY_SCRIPT="$script" \
+  PROXY_PORT="$proxy_port" \
+  PROXY_SECRET="$secret" \
+  PROXY_ADAPTER="$adapter" \
+  PROXY_LOG="$CSSWITCH_DIR/logs/proxy-cli.log" \
+    nohup env "${env_vars[@]}" bash "$WATCHDOG" \
+    >> "$CSSWITCH_DIR/logs/proxy-watchdog.log" 2>&1 &
   local proxy_pid=$!
 
   msg "等待代理就绪..."
@@ -286,9 +292,6 @@ do_start() {
   echo "然后在本机浏览器打开："
   echo "  http://localhost:${sandbox_port}"
   echo ""
-  echo "一次性登录链接："
-  HOME="$SANDBOX_HOME" "$bin" url --data-dir "$DATA_DIR" 2>/dev/null || true
-
   do_login_url
 }
 
@@ -311,6 +314,9 @@ do_stop() {
   local script="$PROJ/proxy/csswitch_proxy.py"
   local script_rex
   script_rex=$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "$script")
+  # 先停 watchdog（它会收到 SIGTERM 后停止重启循环），再停代理
+  pkill -f "proxy-watchdog.*${port}" 2>/dev/null || true
+  sleep 0.3
   pkill -f "${script_rex}.*--port ${port}" || true
   msg "已停止。"
 }
@@ -504,8 +510,8 @@ do_login_url() {
     url="http://127.0.0.1:$port"
   fi
   msg "登录链接: $url"
-  if command -v xdg-open &>/dev/null; then
-    xdg-open "$url" || err "xdg-open 失败，请手动打开链接。"
+  if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v xdg-open &>/dev/null; then
+    xdg-open "$url" 2>/dev/null || true
   fi
 }
 
