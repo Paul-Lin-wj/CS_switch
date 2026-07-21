@@ -28,6 +28,7 @@ PROXY_URL="http://127.0.0.1:18991"
 EMAIL="virtual@localhost.invalid"
 DRY_RUN=0
 SKIP_FORGE=0   # app 调用时置 1：OAuth 由 app 进程内 Rust 伪造，本脚本不再调 node
+NO_SANDBOX=0   # --no-sandbox：传递给 claude-science serve，解除沙箱网络限制
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     --email) EMAIL="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
     --skip-oauth-forge) SKIP_FORGE=1; shift;;
+    --no-sandbox) NO_SANDBOX=1; shift;;
     *) echo "未知参数: $1"; exit 1;;
   esac
 done
@@ -55,6 +57,7 @@ if [[ ! -d "$DATA_DIR/bin" ]]; then
   mkdir -p "$DATA_DIR"
   for asset in bin conda runtime seed-assets; do
     if [[ -d "$REAL_DIR/$asset" ]]; then
+      echo "  复制 $asset ..."
       if [[ "$asset" == "conda" ]]; then
         # conda pkgs/ 里存在跨包相对符号链接（如 gcc 包指向 binutils），
         # 在 pkgs 缓存中是断链；cp -rL 会因此失败。conda 目录只保留符号链接。
@@ -62,6 +65,8 @@ if [[ ! -d "$DATA_DIR/bin" ]]; then
       else
         cp -rL "$REAL_DIR/$asset" "$DATA_DIR/$asset"
       fi
+    else
+      echo "  跳过 $asset（不存在于 $REAL_DIR/$asset）"
     fi
   done
   echo "运行时就绪。"
@@ -115,6 +120,9 @@ _NO_PROXY="127.0.0.1,localhost,::1"
 echo "  外联防卡 = Anthropic HTTPS fast-fail（经 $_FASTFAIL_PROXY，no_proxy=$_NO_PROXY）"
 echo
 
+SERVE_FLAGS="--no-browser --no-auto-update --detached"
+[[ "$NO_SANDBOX" == "1" ]] && SERVE_FLAGS="$SERVE_FLAGS --no-sandbox"
+
 HOME="$SANDBOX_HOME" \
 ANTHROPIC_BASE_URL="$PROXY_URL" \
 https_proxy="$_FASTFAIL_PROXY" HTTPS_PROXY="$_FASTFAIL_PROXY" \
@@ -122,7 +130,7 @@ no_proxy="$_NO_PROXY" NO_PROXY="$_NO_PROXY" \
 "$BIN" serve \
   --data-dir "$DATA_DIR" \
   --port "$PORT" \
-  --no-browser --no-auto-update --detached
+  $SERVE_FLAGS
 
 echo
 echo "已后台启动。验证:"

@@ -20,6 +20,7 @@ DATA_DIR="$SANDBOX_HOME/.claude-science"
 
 # Detect UI tool: prefer dialog, then whiptail, then text.
 # Environment override (e.g. CSSWITCH_UI=text) for non-interactive/testing use.
+# Only use TUI when stdin is a terminal (piped input would crash whiptail/dialog).
 UI_TOOL=""
 if [[ -n "${CSSWITCH_UI:-}" ]]; then
   case "$CSSWITCH_UI" in
@@ -27,9 +28,9 @@ if [[ -n "${CSSWITCH_UI:-}" ]]; then
     dialog|whiptail) UI_TOOL="$CSSWITCH_UI" ;;
     *) echo "未知 CSSWITCH_UI: $CSSWITCH_UI，使用自动检测。" &>2 ;;
   esac
-elif command -v dialog &>/dev/null; then
+elif [[ -t 0 ]] && command -v dialog &>/dev/null; then
   UI_TOOL="dialog"
-elif command -v whiptail &>/dev/null; then
+elif [[ -t 0 ]] && command -v whiptail &>/dev/null; then
   UI_TOOL="whiptail"
 fi
 
@@ -155,8 +156,8 @@ do_start() {
   fi
 
   local active
-  active=$(run_helper active 2>/dev/null || echo "无")
-  if [[ -z "$active" || "$active" == "无" ]]; then
+  active=$(run_helper active 2>/dev/null || echo "")
+  if [[ -z "$active" || "$active" == *"error"* ]]; then
     err "没有生效的 provider，请先添加或切换。"
     return
   fi
@@ -322,7 +323,7 @@ do_status() {
   sandbox_running && sandbox_status="运行中"
   local active
   active=$(run_helper active 2>/dev/null || echo "")
-  if [[ -z "$active" ]]; then
+  if [[ -z "$active" || "$active" == *"error"* ]]; then
     active="无"
   else
     active=$(echo "$active" | python3 -c "import sys,json; d=json.load(sys.stdin); d.pop('api_key',None); print(json.dumps(d,ensure_ascii=False))")
@@ -512,8 +513,15 @@ do_login_url() {
 do_doctor() {
   local cfg adapter has_key
   cfg=$(run_helper load)
-  adapter=$(run_helper active 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('template_id',''))" || echo "")
-  has_key=$(run_helper active 2>/dev/null | python3 -c "import sys,json; print('1' if json.load(sys.stdin).get('api_key') else '0')" || echo "0")
+  local active_json
+  active_json=$(run_helper active 2>/dev/null || echo "")
+  if [[ -z "$active_json" || "$active_json" == *"error"* ]]; then
+    adapter=""
+    has_key="0"
+  else
+    adapter=$(echo "$active_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('template_id',''))")
+    has_key=$(echo "$active_json" | python3 -c "import sys,json; print('1' if json.load(sys.stdin).get('api_key') else '0')")
+  fi
   local proxy_port sandbox_port
   proxy_port=$(echo "$cfg" | python3 -c "import sys,json; print(json.load(sys.stdin)['proxy_port'])")
   sandbox_port=$(echo "$cfg" | python3 -c "import sys,json; print(json.load(sys.stdin)['sandbox_port'])")
