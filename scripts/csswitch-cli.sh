@@ -116,12 +116,6 @@ proxy_health() {
   curl -fsS -m 1 "http://127.0.0.1:$port/$secret/health" &>/dev/null
 }
 
-sandbox_health() {
-  local port
-  port=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin)['sandbox_port'])")
-  curl -fsS -m 1 "http://127.0.0.1:$port/health" &>/dev/null
-}
-
 sandbox_running() {
   local bin
   bin=$(find_science_bin) || return 1
@@ -147,12 +141,11 @@ do_start() {
     return
   fi
 
-  local template_id key key_env adapter base_url model api_format
+  local template_id key key_env adapter base_url model
   template_id=$(echo "$active" | python3 -c "import sys,json; print(json.load(sys.stdin)['template_id'])")
   key=$(echo "$active" | python3 -c "import sys,json; print(json.load(sys.stdin).get('api_key',''))")
   base_url=$(echo "$active" | python3 -c "import sys,json; print(json.load(sys.stdin).get('base_url',''))")
   model=$(echo "$active" | python3 -c "import sys,json; print(json.load(sys.stdin).get('model',''))")
-  api_format=$(echo "$active" | python3 -c "import sys,json; print(json.load(sys.stdin).get('api_format',''))")
 
   if [[ -z "$key" ]]; then
     err "生效 profile 缺少 API Key，请先编辑。"
@@ -187,32 +180,33 @@ cfg['secret'] = "$secret"
 with open(p, "w") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
 EOF
+    chmod 600 "$CSSWITCH_DIR/config.json"
   fi
 
   # Kill old proxy on same port.
   local script="$PROJ/proxy/csswitch_proxy.py"
-  pkill -f "${script}.*--port ${proxy_port}" || true
+  local script_rex
+  script_rex=$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "$script")
+  pkill -f "${script_rex}.*--port ${proxy_port}" || true
 
   msg "启动代理 (adapter=$adapter, port=$proxy_port)..."
-  local env_args=("$key_env=$key")
+  export "$key_env=$key"
   if [[ "$adapter" == "relay" ]]; then
-    [[ -n "$base_url" ]] && env_args+=("CSSWITCH_RELAY_BASE_URL=$base_url")
-    [[ -n "$model" ]] && env_args+=("CSSWITCH_RELAY_MODEL=$model")
-  elif [[ "$adapter" == "openai-custom" ]]; then
-    env_args+=("CSSWITCH_OPENAI_BASE_URL=$base_url")
-    [[ -n "$model" ]] && env_args+=("CSSWITCH_OPENAI_MODEL=$model")
-  elif [[ "$adapter" == "openai-responses" ]]; then
-    env_args+=("CSSWITCH_OPENAI_BASE_URL=$base_url")
-    [[ -n "$model" ]] && env_args+=("CSSWITCH_OPENAI_MODEL=$model")
+    [[ -n "$base_url" ]] && export CSSWITCH_RELAY_BASE_URL="$base_url"
+    [[ -n "$model" ]] && export CSSWITCH_RELAY_MODEL="$model"
+  elif [[ "$adapter" == "openai-custom" || "$adapter" == "openai-responses" ]]; then
+    export CSSWITCH_OPENAI_BASE_URL="$base_url"
+    [[ -n "$model" ]] && export CSSWITCH_OPENAI_MODEL="$model"
   fi
 
   mkdir -p "$CSSWITCH_DIR/logs"
-  env "${env_args[@]}" python3 "$script" \
+  python3 "$script" \
     --provider "$adapter" \
     --port "$proxy_port" \
     --auth-token "$secret" \
     >> "$CSSWITCH_DIR/logs/proxy-cli.log" 2>&1 &
   local proxy_pid=$!
+  unset "$key_env" CSSWITCH_RELAY_BASE_URL CSSWITCH_RELAY_MODEL CSSWITCH_OPENAI_BASE_URL CSSWITCH_OPENAI_MODEL
 
   msg "等待代理就绪..."
   local ok=0
@@ -230,10 +224,13 @@ EOF
   fi
 
   msg "启动沙箱 (port=$sandbox_port)..."
-  SANDBOX_HOME="$SANDBOX_HOME" "$LAUNCH" \
+  if ! SANDBOX_HOME="$SANDBOX_HOME" "$LAUNCH" \
     --port "$sandbox_port" \
     --proxy-url "http://127.0.0.1:$proxy_port/$secret" \
-    --skip-oauth-forge
+    --skip-oauth-forge; then
+    err "沙箱启动失败，代理仍在运行。请检查日志或手动停止。"
+    return
+  fi
 
   msg "等待沙箱就绪..."
   ok=0
@@ -259,7 +256,9 @@ do_stop() {
   local port
   port=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin)['proxy_port'])")
   local script="$PROJ/proxy/csswitch_proxy.py"
-  pkill -f "${script}.*--port ${port}" || true
+  local script_rex
+  script_rex=$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "$script")
+  pkill -f "${script_rex}.*--port ${port}" || true
   msg "已停止。"
 }
 
@@ -270,6 +269,17 @@ do_status() {
   sandbox_running && sandbox_status="运行中"
   local active
   active=$(run_helper active 2>/dev/null || echo "无")
+  active=$(echo "$active" | python3 -c "
+import sys, json
+try:
+    p = json.load(sys.stdin)
+except Exception:
+    p = {}
+if isinstance(p, dict) and 'api_key' in p:
+    k = p['api_key']
+    p['api_key'] = '*' * (len(k) - 4) + k[-4:] if len(k) > 4 else ('****' if k else '')
+print(json.dumps(p, ensure_ascii=False))
+")
   echo "=== 运行状态 ==="
   echo "代理:   $proxy_status"
   echo "沙箱:   $sandbox_status"
