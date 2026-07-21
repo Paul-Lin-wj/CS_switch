@@ -19,12 +19,25 @@ PROXY_ADAPTER="${PROXY_ADAPTER:?}"
 PROXY_LOG="${PROXY_LOG:-/dev/null}"
 
 MAX_RETRIES=50          # 最大连续重启次数（防止无限循环）
+MAX_PORT_RETRIES=10     # 端口占用最大重试次数
 BASE_DELAY=2            # 首次重启等待秒数
 MAX_DELAY=60            # 最大退避秒数
 STABLE_THRESHOLD=30     # 运行超过此秒数视为稳定，重置退避
+QUICK_EXIT=5            # 低于此秒数视为快速退出（可能是端口占用）
 
 retry=0
+port_retry=0
 delay="$BASE_DELAY"
+
+kill_port_occupant() {
+  local pids
+  pids=$(ss -tlnp "sport = :${PROXY_PORT}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
+  if [[ -n "$pids" ]]; then
+    echo "[$(date '+%H:%M:%S')] 端口 $PROXY_PORT 被占用 (pids=$pids)，尝试杀死..." >> "$PROXY_LOG"
+    echo "$pids" | xargs kill -9 2>/dev/null || true
+    sleep 1
+  fi
+}
 
 while (( retry < MAX_RETRIES )); do
   echo "[$(date '+%H:%M:%S')] 代理启动 (attempt=$((retry+1)), adapter=$PROXY_ADAPTER, port=$PROXY_PORT)" >> "$PROXY_LOG"
@@ -48,20 +61,35 @@ while (( retry < MAX_RETRIES )); do
 
   echo "[$(date '+%H:%M:%S')] 代理退出 (pid=$proxy_pid, exit=$exit_code, runtime=${runtime}s)" >> "$PROXY_LOG"
 
-  # 如果运行时间超过阈值，说明是稳定运行后退出，重置退避
-  if (( runtime >= STABLE_THRESHOLD )); then
-    retry=0
-    delay="$BASE_DELAY"
-  else
-    retry=$((retry + 1))
-  fi
-
   # 检查是否被外部 pkill 杀死（SIGTERM=143, SIGKILL=137）
   # 这些情况下不重启（说明是用户主动停止）
   if (( exit_code == 143 || exit_code == 137 )); then
     echo "[$(date '+%H:%M:%S')] 代理被外部信号终止 (exit=$exit_code)，停止保活。" >> "$PROXY_LOG"
     exit 0
   fi
+
+  # 快速退出（<5s）+ exit code 2 = 端口绑定失败
+  if (( runtime < QUICK_EXIT && (exit_code == 2 || exit_code == 0) )); then
+    port_retry=$((port_retry + 1))
+    if (( port_retry >= MAX_PORT_RETRIES )); then
+      echo "[$(date '+%H:%M:%S')] 端口绑定失败达 $MAX_PORT_RETRIES 次，停止保活。" >> "$PROXY_LOG"
+      exit 1
+    fi
+    echo "[$(date '+%H:%M:%S')] 疑似端口占用 (exit=$exit_code, runtime=${runtime}s)，尝试清理..." >> "$PROXY_LOG"
+    kill_port_occupant
+    # 端口占用退避较短
+    sleep 2
+    continue
+  fi
+
+  # 正常运行后退出，重置退避
+  if (( runtime >= STABLE_THRESHOLD )); then
+    retry=0
+    port_retry=0
+    delay="$BASE_DELAY"
+  fi
+
+  retry=$((retry + 1))
 
   echo "[$(date '+%H:%M:%S')] ${delay}s 后重启..." >> "$PROXY_LOG"
   sleep "$delay"

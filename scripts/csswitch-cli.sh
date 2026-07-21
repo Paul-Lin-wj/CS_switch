@@ -208,13 +208,27 @@ print('1' if t['requires_model'] else '')
     run_helper set-secret --secret "$secret" >/dev/null
   fi
 
-  # Kill old proxy watchdog + proxy on same port.
+  # Kill old proxy watchdog + proxy on same port（多重保障）。
   local script="$PROJ/proxy/csswitch_proxy.py"
   local script_rex
   script_rex=$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "$script")
-  pkill -f "${script_rex}.*--port ${proxy_port}" || true
-  pkill -f "proxy-watchdog.*--port ${proxy_port}" 2>/dev/null || true
-  sleep 0.3
+  # 方法 1：pkill 匹配脚本路径 + 端口
+  pkill -f "${script_rex}.*--port ${proxy_port}" 2>/dev/null || true
+  # 方法 2：pkill 匹配 watchdog
+  pkill -f "proxy-watchdog.*${proxy_port}" 2>/dev/null || true
+  # 方法 3：按端口查找并杀死占用进程（兜底 pkill 匹配失败的情况）
+  local pids
+  pids=$(ss -tlnp "sport = :${proxy_port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
+  if [[ -n "$pids" ]]; then
+    echo "$pids" | xargs kill -9 2>/dev/null || true
+  fi
+  # 等待端口释放（最多 3 秒）
+  for _ in $(seq 1 30); do
+    if ! ss -tlnp "sport = :${proxy_port}" 2>/dev/null | grep -q "LISTEN"; then
+      break
+    fi
+    sleep 0.1
+  done
 
   msg "启动代理 (adapter=$adapter, port=$proxy_port, 带保活)..."
   local env_vars=("$key_env=$key")
@@ -239,15 +253,20 @@ print('1' if t['requires_model'] else '')
 
   msg "等待代理就绪..."
   local ok=0
-  for _ in $(seq 1 40); do
+  for _ in $(seq 1 60); do
+    # watchdog 已退出 → 代理无法启动，立即报错
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+      err "代理进程已退出，查看 $CSSWITCH_DIR/logs/proxy-cli.log"
+      return
+    fi
     if curl -fsS -m 1 "http://127.0.0.1:$proxy_port/$secret/health" &>/dev/null; then
       ok=1
       break
     fi
-    sleep 0.1
+    sleep 0.2
   done
   if [[ "$ok" == "0" ]]; then
-    err "代理启动失败或探活超时，查看 $CSSWITCH_DIR/logs/proxy-cli.log"
+    err "代理探活超时（12 秒），查看 $CSSWITCH_DIR/logs/proxy-cli.log"
     kill "$proxy_pid" 2>/dev/null || true
     return
   fi
@@ -328,8 +347,13 @@ do_stop() {
   script_rex=$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "$script")
   # 先停 watchdog（它会收到 SIGTERM 后停止重启循环），再停代理
   pkill -f "proxy-watchdog.*${port}" 2>/dev/null || true
-  sleep 0.3
-  pkill -f "${script_rex}.*--port ${port}" || true
+  pkill -f "${script_rex}.*--port ${port}" 2>/dev/null || true
+  # 兜底：按端口杀死占用进程
+  local pids
+  pids=$(ss -tlnp "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
+  if [[ -n "$pids" ]]; then
+    echo "$pids" | xargs kill -9 2>/dev/null || true
+  fi
   msg "已停止。"
 }
 
