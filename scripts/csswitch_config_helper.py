@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 from tempfile import mkstemp
 
@@ -147,6 +148,86 @@ def cmd_set_active(args):
     return 0
 
 
+def mask_key(k):
+    if len(k) <= 4:
+        return "****" if k else ""
+    return "*" * (len(k) - 4) + k[-4:]
+
+
+def cmd_add(args):
+    cfg = load_config()
+    tpl = next((t for t in DEFAULT_TEMPLATES if t["id"] == args.template), None)
+    if tpl is None:
+        print(json.dumps({"error": f"unknown template: {args.template}"}, ensure_ascii=False))
+        return 1
+    base_url = (args.base_url if args.base_url is not None else tpl["base_url"]).strip()
+    model = (args.model or "").strip()
+    if tpl["requires_model"] and not model:
+        print(json.dumps({"error": "model is required for this provider"}, ensure_ascii=False))
+        return 1
+    if tpl["base_url_editable"] and not base_url:
+        print(json.dumps({"error": "base_url is required for this provider"}, ensure_ascii=False))
+        return 1
+    profile = {
+        "id": str(uuid.uuid4()),
+        "name": args.name,
+        "template_id": tpl["id"],
+        "category": tpl["category"],
+        "api_format": tpl["api_format"],
+        "base_url": base_url,
+        "api_key": args.key or "",
+        "model": model,
+        "website_url": None,
+        "icon": None,
+        "icon_color": None,
+        "sort_index": None,
+        "created_at": None,
+        "notes": None,
+    }
+    cfg["profiles"].append(profile)
+    cfg["active_id"] = profile["id"]
+    save_config(cfg)
+    out = {k: v for k, v in profile.items() if k != "api_key"}
+    out["key"] = mask_key(profile["api_key"])
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+def cmd_edit(args):
+    cfg = load_config()
+    profile = next((p for p in cfg.get("profiles", []) if p["id"] == args.profile_id), None)
+    if profile is None:
+        print(json.dumps({"error": f"profile not found: {args.profile_id}"}, ensure_ascii=False))
+        return 1
+    if args.name is not None:
+        profile["name"] = args.name
+    if args.base_url is not None:
+        profile["base_url"] = args.base_url.strip()
+    if args.model is not None:
+        profile["model"] = args.model.strip()
+    if args.key is not None and args.key != "":
+        profile["api_key"] = args.key
+    save_config(cfg)
+    out = {k: v for k, v in profile.items() if k != "api_key"}
+    out["key"] = mask_key(profile["api_key"])
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+def cmd_delete(args):
+    cfg = load_config()
+    before = len(cfg.get("profiles", []))
+    cfg["profiles"] = [p for p in cfg.get("profiles", []) if p["id"] != args.profile_id]
+    if len(cfg["profiles"]) == before:
+        print(json.dumps({"error": f"profile not found: {args.profile_id}"}, ensure_ascii=False))
+        return 1
+    if cfg.get("active_id") == args.profile_id:
+        cfg["active_id"] = ""
+    save_config(cfg)
+    print(json.dumps({"ok": True}, ensure_ascii=False))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="CSSwitch config helper")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -156,6 +237,23 @@ def main():
     sub.add_parser("active", help="show active profile as JSON")
     p_set = sub.add_parser("set-active", help="set active profile")
     p_set.add_argument("profile_id")
+
+    p_add = sub.add_parser("add", help="add a new profile")
+    p_add.add_argument("--template", required=True)
+    p_add.add_argument("--name", required=True)
+    p_add.add_argument("--key", default="")
+    p_add.add_argument("--base-url", default=None)
+    p_add.add_argument("--model", default="")
+
+    p_edit = sub.add_parser("edit", help="edit a profile")
+    p_edit.add_argument("profile_id")
+    p_edit.add_argument("--name", default=None)
+    p_edit.add_argument("--key", default=None)
+    p_edit.add_argument("--base-url", default=None)
+    p_edit.add_argument("--model", default=None)
+
+    p_del = sub.add_parser("delete", help="delete a profile")
+    p_del.add_argument("profile_id")
     args = parser.parse_args()
     handlers = {
         "load": cmd_load,
@@ -163,6 +261,9 @@ def main():
         "list": cmd_list,
         "active": cmd_active,
         "set-active": cmd_set_active,
+        "add": cmd_add,
+        "edit": cmd_edit,
+        "delete": cmd_delete,
     }
     try:
         return handlers[args.cmd](args)
