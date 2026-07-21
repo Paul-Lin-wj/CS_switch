@@ -17,11 +17,11 @@ DATA_DIR="$SANDBOX_HOME/.claude-science"
 # Environment override (e.g. CSSWITCH_UI=text) for non-interactive/testing use.
 UI_TOOL=""
 if [[ -n "${CSSWITCH_UI:-}" ]]; then
-  if [[ "$CSSWITCH_UI" == "text" ]]; then
-    UI_TOOL=""
-  else
-    UI_TOOL="$CSSWITCH_UI"
-  fi
+  case "$CSSWITCH_UI" in
+    text) UI_TOOL="" ;;
+    dialog|whiptail) UI_TOOL="$CSSWITCH_UI" ;;
+    *) echo "未知 CSSWITCH_UI: $CSSWITCH_UI，使用自动检测。" &>2 ;;
+  esac
 elif command -v dialog &>/dev/null; then
   UI_TOOL="dialog"
 elif command -v whiptail &>/dev/null; then
@@ -136,8 +136,16 @@ do_start() {
   sandbox_port=$(echo "$cfg" | python3 -c "import sys,json; print(json.load(sys.stdin)['sandbox_port'])")
   secret=$(echo "$cfg" | python3 -c "import sys,json; print(json.load(sys.stdin).get('secret',''))")
 
-  if [[ "$proxy_port" == "8000" || "$sandbox_port" == "8000" ]]; then
+  if ! [[ "$proxy_port" =~ ^[0-9]+$ ]] || ! [[ "$sandbox_port" =~ ^[0-9]+$ ]]; then
+    err "端口配置无效，必须为整数。"
+    return
+  fi
+  if (( proxy_port == 8000 || sandbox_port == 8000 )); then
     err "端口 8000 是真实 Science 保留端口，请在配置中修改。"
+    return
+  fi
+  if (( proxy_port == sandbox_port )); then
+    err "代理端口与沙箱端口不能相同。"
     return
   fi
 
@@ -188,17 +196,17 @@ do_start() {
   pkill -f "${script_rex}.*--port ${proxy_port}" || true
 
   msg "启动代理 (adapter=$adapter, port=$proxy_port)..."
-  export "$key_env=$key"
+  local env_vars=("$key_env=$key")
   if [[ "$adapter" == "relay" ]]; then
-    [[ -n "$base_url" ]] && export CSSWITCH_RELAY_BASE_URL="$base_url"
-    [[ -n "$model" ]] && export CSSWITCH_RELAY_MODEL="$model"
+    [[ -n "$base_url" ]] && env_vars+=("CSSWITCH_RELAY_BASE_URL=$base_url")
+    [[ -n "$model" ]] && env_vars+=("CSSWITCH_RELAY_MODEL=$model")
   elif [[ "$adapter" == "openai-custom" || "$adapter" == "openai-responses" ]]; then
-    export CSSWITCH_OPENAI_BASE_URL="$base_url"
-    [[ -n "$model" ]] && export CSSWITCH_OPENAI_MODEL="$model"
+    [[ -n "$base_url" ]] && env_vars+=("CSSWITCH_OPENAI_BASE_URL=$base_url")
+    [[ -n "$model" ]] && env_vars+=("CSSWITCH_OPENAI_MODEL=$model")
   fi
 
   mkdir -p "$CSSWITCH_DIR/logs"
-  python3 "$script" \
+  env "${env_vars[@]}" python3 "$script" \
     --provider "$adapter" \
     --port "$proxy_port" \
     --auth-token "$secret" \
@@ -344,19 +352,20 @@ do_add() {
   echo -n "API Key: "
   read -rs key
   echo
-  local base_url_arg=""
+  local base_url=""
   if [[ "$base_url_editable" == "1" ]]; then
     echo -n "Base URL: "
     read -r base_url
-    base_url_arg="--base-url $base_url"
   fi
-  local model_arg=""
+  local model=""
   if [[ "$requires_model" == "1" ]]; then
     echo -n "模型名: "
     read -r model
-    model_arg="--model $model"
   fi
-  run_helper add --template "$tpl" --name "$name" --key "$key" $base_url_arg $model_arg
+  local args=("--template" "$tpl" "--name" "$name" "--key" "$key")
+  [[ -n "$base_url" ]] && args+=("--base-url" "$base_url")
+  [[ -n "$model" ]] && args+=("--model" "$model")
+  run_helper add "${args[@]}"
   msg "已添加并激活: $name [$tpl_name]"
 }
 
@@ -477,14 +486,10 @@ do_init() {
   if [[ -d "$CSSWITCH_DIR/sandbox" ]]; then
     chmod 700 "$CSSWITCH_DIR/sandbox"
   fi
-  if [[ ! -f "$CSSWITCH_DIR/config.json" ]]; then
-    tmp_config="$(mktemp "$CSSWITCH_DIR/.config.json.tmp.XXXXXX")"
-    run_helper load > "$tmp_config"
-    chmod 600 "$tmp_config"
-    mv "$tmp_config" "$CSSWITCH_DIR/config.json"
+  if run_helper load >/dev/null; then
     msg "已创建默认配置: $CSSWITCH_DIR/config.json"
   else
-    msg "配置已存在，跳过创建。"
+    err "创建默认配置失败。"
   fi
 }
 

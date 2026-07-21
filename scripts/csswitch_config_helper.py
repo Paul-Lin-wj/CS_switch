@@ -46,10 +46,6 @@ def config_path():
     return Path(os.environ.get("CSSWITCH_CONFIG", Path.home() / ".csswitch" / "config.json"))
 
 
-def default_dir():
-    return config_path().parent
-
-
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
@@ -63,9 +59,9 @@ def assert_no_symlink_in_path(path: Path):
 
 def load_config():
     p = config_path()
+    assert_no_symlink_in_path(p)
     if not p.exists():
         return default_config()
-    assert_no_symlink_in_path(p)
     with open(p, "r", encoding="utf-8") as f:
         data = json.load(f)
     cfg = default_config()
@@ -107,7 +103,11 @@ def save_config(cfg):
 
 
 def cmd_load(args):
-    print(json.dumps(load_config(), ensure_ascii=False))
+    p = config_path()
+    cfg = load_config()
+    if not p.exists():
+        save_config(cfg)
+    print(json.dumps(cfg, ensure_ascii=False))
     return 0
 
 
@@ -130,7 +130,7 @@ def cmd_active(args):
             active = p
             break
     if active is None:
-        print(json.dumps({"error": "no active profile"}, ensure_ascii=False), file=sys.stderr)
+        print(json.dumps({"error": "no active profile"}, ensure_ascii=False))
         return 1
     print(json.dumps(active, ensure_ascii=False))
     return 0
