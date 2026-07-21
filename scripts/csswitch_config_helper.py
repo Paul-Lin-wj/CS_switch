@@ -130,7 +130,7 @@ def cmd_active(args):
             active = p
             break
     if active is None:
-        print(json.dumps({"error": "no active profile"}, ensure_ascii=False))
+        print(json.dumps({"error": "no active profile"}, ensure_ascii=False), file=sys.stderr)
         return 1
     print(json.dumps(active, ensure_ascii=False))
     return 0
@@ -228,6 +228,14 @@ def cmd_delete(args):
     return 0
 
 
+def cmd_set_secret(args):
+    cfg = load_config()
+    cfg["secret"] = args.secret
+    save_config(cfg)
+    print(json.dumps({"ok": True}, ensure_ascii=False))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="CSSwitch config helper")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -254,6 +262,10 @@ def main():
 
     p_del = sub.add_parser("delete", help="delete a profile")
     p_del.add_argument("profile_id")
+
+    p_secret = sub.add_parser("set-secret", help="set the proxy auth secret")
+    p_secret.add_argument("--secret", required=True)
+
     args = parser.parse_args()
     handlers = {
         "load": cmd_load,
@@ -264,6 +276,7 @@ def main():
         "add": cmd_add,
         "edit": cmd_edit,
         "delete": cmd_delete,
+        "set-secret": cmd_set_secret,
     }
     try:
         return handlers[args.cmd](args)

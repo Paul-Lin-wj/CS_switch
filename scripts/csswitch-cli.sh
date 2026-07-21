@@ -135,7 +135,7 @@ do_start() {
   fi
 
   local active
-  active=$(run_helper active 2>/dev/null || true)
+  active=$(run_helper active 2>/dev/null || echo "无")
   if [[ -z "$active" || "$active" == "无" ]]; then
     err "没有生效的 provider，请先添加或切换。"
     return
@@ -171,16 +171,7 @@ do_start() {
   # Generate secret if missing.
   if [[ -z "$secret" ]]; then
     secret=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-    python3 - <<EOF
-import json, os
-p = os.path.expanduser("$CSSWITCH_DIR/config.json")
-with open(p) as f:
-    cfg = json.load(f)
-cfg['secret'] = "$secret"
-with open(p, "w") as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-EOF
-    chmod 600 "$CSSWITCH_DIR/config.json"
+    run_helper set-secret --secret "$secret" >/dev/null
   fi
 
   # Kill old proxy on same port.
@@ -206,7 +197,6 @@ EOF
     --auth-token "$secret" \
     >> "$CSSWITCH_DIR/logs/proxy-cli.log" 2>&1 &
   local proxy_pid=$!
-  unset "$key_env" CSSWITCH_RELAY_BASE_URL CSSWITCH_RELAY_MODEL CSSWITCH_OPENAI_BASE_URL CSSWITCH_OPENAI_MODEL
 
   msg "等待代理就绪..."
   local ok=0
@@ -228,7 +218,8 @@ EOF
     --port "$sandbox_port" \
     --proxy-url "http://127.0.0.1:$proxy_port/$secret" \
     --skip-oauth-forge; then
-    err "沙箱启动失败，代理仍在运行。请检查日志或手动停止。"
+    err "沙箱启动失败，已停止代理。请检查日志后重试。"
+    kill "$proxy_pid" 2>/dev/null || true
     return
   fi
 
@@ -268,18 +259,12 @@ do_status() {
   proxy_health && proxy_status="运行中"
   sandbox_running && sandbox_status="运行中"
   local active
-  active=$(run_helper active 2>/dev/null || echo "无")
-  active=$(echo "$active" | python3 -c "
-import sys, json
-try:
-    p = json.load(sys.stdin)
-except Exception:
-    p = {}
-if isinstance(p, dict) and 'api_key' in p:
-    k = p['api_key']
-    p['api_key'] = '*' * (len(k) - 4) + k[-4:] if len(k) > 4 else ('****' if k else '')
-print(json.dumps(p, ensure_ascii=False))
-")
+  active=$(run_helper active 2>/dev/null || echo "")
+  if [[ -z "$active" ]]; then
+    active="无"
+  else
+    active=$(echo "$active" | python3 -c "import sys,json; d=json.load(sys.stdin); d.pop('api_key',None); print(json.dumps(d,ensure_ascii=False))")
+  fi
   echo "=== 运行状态 ==="
   echo "代理:   $proxy_status"
   echo "沙箱:   $sandbox_status"
