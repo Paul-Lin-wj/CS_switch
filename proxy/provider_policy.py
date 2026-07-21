@@ -8,6 +8,47 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
+
+# --- Multi-provider prefix routing ---
+# Each template_id maps to a unique 2-char prefix used in model IDs
+# (e.g. "ds-claude-opus-4-8" for DeepSeek). Science sees prefixed IDs
+# in its model selector; the proxy strips the prefix before forwarding.
+PROVIDER_PREFIXES = {
+    "deepseek": "ds",
+    "qwen": "qw",
+    "kimi": "km",
+    "minimax": "mx",
+    "glm": "gl",
+    "openrouter": "or",
+    "openai-custom": "oc",
+    "openai-responses": "rs",
+    "relay": "rl",
+}
+PREFIX_TO_TEMPLATE = {v: k for k, v in PROVIDER_PREFIXES.items()}
+# Prefixes sorted longest-first for greedy matching
+_SORTED_PREFIXES = sorted(PROVIDER_PREFIXES.values(), key=len, reverse=True)
+
+
+def parse_prefixed_model(model_id):
+    """Parse a prefixed model ID like 'ds-claude-opus-4-8' into (prefix, bare_model).
+
+    Returns (None, model_id) if no valid prefix is found.
+    """
+    if not model_id:
+        return None, model_id
+    for pfx in _SORTED_PREFIXES:
+        if model_id.startswith(pfx + "-"):
+            return pfx, model_id[len(pfx) + 1:]
+    return None, model_id
+
+
+def strip_prefix(model_id, prefix):
+    """Strip a known prefix from a model ID. Returns bare model name."""
+    if prefix and model_id.startswith(prefix + "-"):
+        return model_id[len(prefix) + 1:]
+    return model_id
+
+
 _DATE_SUFFIX = re.compile(r"-\d{8}$")
 
 

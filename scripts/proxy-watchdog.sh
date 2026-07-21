@@ -16,6 +16,7 @@ PROXY_SCRIPT="${PROXY_SCRIPT:?}"
 PROXY_PORT="${PROXY_PORT:?}"
 PROXY_SECRET="${PROXY_SECRET:?}"
 PROXY_ADAPTER="${PROXY_ADAPTER:?}"
+PROXY_MULTI_CONFIG="${PROXY_MULTI_CONFIG:-}"
 PROXY_LOG="${PROXY_LOG:-/dev/null}"
 
 MAX_RETRIES=50          # 最大连续重启次数（防止无限循环）
@@ -45,11 +46,13 @@ while (( retry < MAX_RETRIES )); do
   start_time=$(date +%s)
 
   # 启动代理（前台运行，捕获退出码）
-  python3 "$PROXY_SCRIPT" \
-    --provider "$PROXY_ADAPTER" \
-    --port "$PROXY_PORT" \
-    --auth-token "$PROXY_SECRET" \
-    >> "$PROXY_LOG" 2>&1 &
+  local proxy_cmd=(python3 "$PROXY_SCRIPT" --port "$PROXY_PORT" --auth-token "$PROXY_SECRET")
+  if [[ -n "$PROXY_MULTI_CONFIG" && -f "$PROXY_MULTI_CONFIG" ]]; then
+    proxy_cmd+=(--multi-config "$PROXY_MULTI_CONFIG")
+  else
+    proxy_cmd+=(--provider "$PROXY_ADAPTER")
+  fi
+  "${proxy_cmd[@]}" >> "$PROXY_LOG" 2>&1 &
   proxy_pid=$!
 
   # 等待代理进程退出

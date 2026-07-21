@@ -63,15 +63,32 @@ else
 fi
 
 # 组装代理启动参数
-PROXY_ARGS=(
-  --provider "$PROVIDER"
-  --port "$PROXY_PORT"
-)
-if [[ "$PROVIDER" == "openai-custom" || "$PROVIDER" == "openai-responses" ]] && [[ -n "${CSSWITCH_OPENAI_BASE_URL:-}" ]]; then
-  PROXY_ARGS+=(--openai-base "$CSSWITCH_OPENAI_BASE_URL")
-fi
-if [[ "$PROVIDER" == "relay" ]] && [[ -n "${CSSWITCH_RELAY_BASE_URL:-}" ]]; then
-  PROXY_ARGS+=(--relay-base "$CSSWITCH_RELAY_BASE_URL")
+MULTI_CONFIG_FILE=""
+if [[ "${CSSWITCH_MULTI:-0}" == "1" && -n "${CSSWITCH_ACTIVE_PROVIDERS:-}" ]]; then
+  # Multi-provider mode: generate config from config helper
+  CONFIG_FILE="${CSSWITCH_CONFIG:-$HOME/.csswitch/config.json}"
+  MULTI_CONFIG_FILE="$LOG_DIR/multi-config.json"
+  CSSWITCH_CONFIG="$CONFIG_FILE" python3 "$CSSWITCH_REPO/scripts/csswitch_config_helper.py" multi-config > "$MULTI_CONFIG_FILE"
+  PROXY_ARGS=(--multi-config "$MULTI_CONFIG_FILE" --port "$PROXY_PORT")
+  # Export all provider keys from multi-config
+  eval "$(python3 -c "
+import json
+mc = json.load(open('$MULTI_CONFIG_FILE'))
+for p in mc.get('providers', []):
+    ke, ak = p.get('key_env',''), p.get('api_key','')
+    if ke and ak: print(f'export {ke}="{ak}"')
+")"
+else
+  PROXY_ARGS=(
+    --provider "$PROVIDER"
+    --port "$PROXY_PORT"
+  )
+  if [[ "$PROVIDER" == "openai-custom" || "$PROVIDER" == "openai-responses" ]] && [[ -n "${CSSWITCH_OPENAI_BASE_URL:-}" ]]; then
+    PROXY_ARGS+=(--openai-base "$CSSWITCH_OPENAI_BASE_URL")
+  fi
+  if [[ "$PROVIDER" == "relay" ]] && [[ -n "${CSSWITCH_RELAY_BASE_URL:-}" ]]; then
+    PROXY_ARGS+=(--relay-base "$CSSWITCH_RELAY_BASE_URL")
+  fi
 fi
 
 echo "=== CSSwitch headless 启动 ==="

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CSSwitch-Linux CLI config helper. Reads/writes ~/.csswitch/config.json (schema v2)."""
+"""CSSwitch-Linux CLI config helper. Reads/writes ~/.csswitch/config.json (schema v3)."""
 import argparse
 import json
 import os
@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from tempfile import mkstemp
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 DEFAULT_TEMPLATES = [
     {"id": "deepseek", "name": "DeepSeek", "category": "deepseek", "adapter": "deepseek",
@@ -40,6 +40,30 @@ DEFAULT_TEMPLATES = [
      "api_format": "anthropic", "base_url": "", "base_url_editable": True,
      "requires_model": True, "key_env": "CSSWITCH_RELAY_KEY", "builtin_models": []},
 ]
+
+# Static prefix map for multi-provider model ID namespacing.
+# Each template_id gets a unique 2-char prefix prepended to model IDs in the
+# Science model selector, enabling in-session provider switching.
+PROVIDER_PREFIXES = {
+    "deepseek": "ds",
+    "qwen": "qw",
+    "kimi": "km",
+    "minimax": "mx",
+    "glm": "gl",
+    "openrouter": "or",
+    "openai-custom": "oc",
+    "openai-responses": "rs",
+    "relay": "rl",
+}
+
+def prefix_for_template(template_id: str) -> str:
+    """Return the 2-char model ID prefix for a template, or first 2 chars as fallback."""
+    return PROVIDER_PREFIXES.get(template_id, template_id[:2].lower())
+
+
+def templates_by_id():
+    """Return templates indexed by id."""
+    return {t["id"]: t for t in DEFAULT_TEMPLATES}
 
 
 def config_path():
@@ -80,6 +104,11 @@ def default_config():
         "sandbox_port": 8990,
         "secret": "",
         "mode": "proxy",
+        # Multi-provider fields (schema v3):
+        # active_providers: list of profile IDs to expose simultaneously
+        # default_provider: profile ID for bare claude-* requests (Science internals)
+        "active_providers": [],
+        "default_provider": "",
     }
 
 
@@ -236,6 +265,91 @@ def cmd_set_secret(args):
     return 0
 
 
+def cmd_set_active_providers(args):
+    """Set which profiles are active in multi-provider mode."""
+    cfg = load_config()
+    ids = {p["id"] for p in cfg.get("profiles", [])}
+    requested = [x.strip() for x in args.profile_ids.split(",") if x.strip()]
+    for pid in requested:
+        if pid not in ids:
+            print(json.dumps({"error": f"profile not found: {pid}"}, ensure_ascii=False))
+            return 1
+    cfg["active_providers"] = requested
+    if not cfg.get("default_provider") or cfg["default_provider"] not in requested:
+        cfg["default_provider"] = requested[0] if requested else ""
+    cfg["mode"] = "multi" if len(requested) > 1 else "proxy"
+    save_config(cfg)
+    print(json.dumps({"ok": True, "active_providers": requested,
+                       "default_provider": cfg["default_provider"],
+                       "mode": cfg["mode"]}, ensure_ascii=False))
+    return 0
+
+
+def cmd_set_default_provider(args):
+    """Set which profile handles bare claude-* requests in multi-provider mode."""
+    cfg = load_config()
+    ids = {p["id"] for p in cfg.get("profiles", [])}
+    if args.profile_id not in ids:
+        print(json.dumps({"error": f"profile not found: {args.profile_id}"}, ensure_ascii=False))
+        return 1
+    cfg["default_provider"] = args.profile_id
+    save_config(cfg)
+    print(json.dumps({"ok": True, "default_provider": args.profile_id}, ensure_ascii=False))
+    return 0
+
+
+def cmd_multi_config(args):
+    """Return the full multi-provider config for the proxy launcher.
+
+    Output includes all active provider profiles with their templates,
+    prefix assignments, and the default provider ID.
+    """
+    cfg = load_config()
+    templates = templates_by_id()
+    active_ids = cfg.get("active_providers", [])
+    if not active_ids:
+        # Fall back to single active_id
+        if cfg.get("active_id"):
+            active_ids = [cfg["active_id"]]
+    profiles_by_id = {p["id"]: p for p in cfg.get("profiles", [])}
+    providers = []
+    for pid in active_ids:
+        prof = profiles_by_id.get(pid)
+        if not prof:
+            continue
+        tpl = templates.get(prof.get("template_id", ""), {})
+        prefix = prefix_for_template(prof.get("template_id", ""))
+        providers.append({
+            "profile_id": pid,
+            "name": prof.get("name", ""),
+            "template_id": prof.get("template_id", ""),
+            "adapter": tpl.get("adapter", prof.get("template_id", "")),
+            "api_format": tpl.get("api_format", "anthropic"),
+            "base_url": prof.get("base_url", ""),
+            "api_key": prof.get("api_key", ""),
+            "model": prof.get("model", ""),
+            "key_env": tpl.get("key_env", ""),
+            "prefix": prefix,
+            "models": tpl.get("builtin_models", []),
+            "base_url_editable": tpl.get("base_url_editable", False),
+            "requires_model": tpl.get("requires_model", False),
+        })
+    default_pid = cfg.get("default_provider", "") or (active_ids[0] if active_ids else "")
+    default_prefix = ""
+    if default_pid in profiles_by_id:
+        default_prefix = prefix_for_template(profiles_by_id[default_pid].get("template_id", ""))
+    result = {
+        "mode": cfg.get("mode", "proxy"),
+        "proxy_port": cfg.get("proxy_port", 18991),
+        "sandbox_port": cfg.get("sandbox_port", 8990),
+        "secret": cfg.get("secret", ""),
+        "default_provider": default_pid,
+        "default_prefix": default_prefix,
+        "providers": providers,
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
 def main():
     parser = argparse.ArgumentParser(description="CSSwitch config helper")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -266,6 +380,14 @@ def main():
     p_secret = sub.add_parser("set-secret", help="set the proxy auth secret")
     p_secret.add_argument("--secret", required=True)
 
+    p_sap = sub.add_parser("set-active-providers", help="set active providers for multi-provider mode")
+    p_sap.add_argument("profile_ids", help="comma-separated profile IDs")
+
+    p_sdp = sub.add_parser("set-default-provider", help="set default provider for bare claude-* requests")
+    p_sdp.add_argument("profile_id")
+
+    sub.add_parser("multi-config", help="return multi-provider config for proxy launcher")
+
     args = parser.parse_args()
     handlers = {
         "load": cmd_load,
@@ -277,6 +399,9 @@ def main():
         "edit": cmd_edit,
         "delete": cmd_delete,
         "set-secret": cmd_set_secret,
+        "set-active-providers": cmd_set_active_providers,
+        "set-default-provider": cmd_set_default_provider,
+        "multi-config": cmd_multi_config,
     }
     try:
         return handlers[args.cmd](args)

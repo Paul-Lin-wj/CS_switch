@@ -230,22 +230,50 @@ print('1' if t['requires_model'] else '')
     sleep 0.1
   done
 
-  msg "启动代理 (adapter=$adapter, port=$proxy_port, 带保活)..."
-  local env_vars=("$key_env=$key")
-  if [[ "$adapter" == "relay" ]]; then
-    [[ -n "$base_url" ]] && env_vars+=("CSSWITCH_RELAY_BASE_URL=$base_url")
-    [[ -n "$model" ]] && env_vars+=("CSSWITCH_RELAY_MODEL=$model")
-  elif [[ "$adapter" == "openai-custom" || "$adapter" == "openai-responses" ]]; then
-    [[ -n "$base_url" ]] && env_vars+=("CSSWITCH_OPENAI_BASE_URL=$base_url")
-    [[ -n "$model" ]] && env_vars+=("CSSWITCH_OPENAI_MODEL=$model")
+  mkdir -p "$CSSWITCH_DIR/logs"
+
+  # Check if multi-provider mode
+  local cfg_mode env_vars
+  cfg_mode=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin).get('mode','proxy'))")
+  local multi_config_file=""
+
+  if [[ "$cfg_mode" == "multi" ]]; then
+    multi_config_file="$CSSWITCH_DIR/logs/multi-config.json"
+    run_helper multi-config > "$multi_config_file"
+    msg "启动代理 (mode=multi, port=$proxy_port, 带保活)..."
+    # Collect all API keys from multi-config into env file
+    local env_file="$CSSWITCH_DIR/logs/multi-env.sh"
+    python3 -c "
+import json
+mc = json.load(open('$multi_config_file'))
+with open('$env_file', 'w') as f:
+    for p in mc.get('providers', []):
+        ke, ak = p.get('key_env',''), p.get('api_key','')
+        if ke and ak: f.write(f'export {ke}={ak}\n')
+"
+    env_vars=()
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && env_vars+=("$line")
+    done < "$env_file"
+    rm -f "$env_file"
+  else
+    msg "启动代理 (adapter=$adapter, port=$proxy_port, 带保活)..."
+    env_vars=("$key_env=$key")
+    if [[ "$adapter" == "relay" ]]; then
+      [[ -n "$base_url" ]] && env_vars+=("CSSWITCH_RELAY_BASE_URL=$base_url")
+      [[ -n "$model" ]] && env_vars+=("CSSWITCH_RELAY_MODEL=$model")
+    elif [[ "$adapter" == "openai-custom" || "$adapter" == "openai-responses" ]]; then
+      [[ -n "$base_url" ]] && env_vars+=("CSSWITCH_OPENAI_BASE_URL=$base_url")
+      [[ -n "$model" ]] && env_vars+=("CSSWITCH_OPENAI_MODEL=$model")
+    fi
   fi
 
-  mkdir -p "$CSSWITCH_DIR/logs"
-  # 用 watchdog 包装代理：进程崩溃后自动重启（指数退避，最多 50 次）
+  # 用 watchdog 包装代理
   PROXY_SCRIPT="$script" \
   PROXY_PORT="$proxy_port" \
   PROXY_SECRET="$secret" \
-  PROXY_ADAPTER="$adapter" \
+  PROXY_ADAPTER="${adapter:-multi}" \
+  PROXY_MULTI_CONFIG="${multi_config_file}" \
   PROXY_LOG="$CSSWITCH_DIR/logs/proxy-cli.log" \
     nohup env "${env_vars[@]}" bash "$WATCHDOG" \
     >> "$CSSWITCH_DIR/logs/proxy-watchdog.log" 2>&1 &

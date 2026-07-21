@@ -160,6 +160,12 @@ KEY = None       # 当前 provider 的 key，只驻内存
 LOG = None
 PROV_NAME = None  # 运行时设定；模块被 import 做测试时也要有定义，避免 handler NameError
 AUTH_SECRET = None  # 未设则不启用鉴权（保持旧行为）
+
+# --- Multi-provider mode ---
+MULTI_MODE = False
+MULTI_REGISTRY = {}  # prefix -> {"prov": dict, "key": str, "prov_name": str, "policy": Policy, ...}
+DEFAULT_PREFIX = ""  # prefix for bare claude-* fallback
+_thread_ctx = threading.local()
 # relay 模式：最近一次 /v1/models 回源拉到的上游模型 id 列表。resolve_model 用它把
 # Science 发来的裸 id（如标题 agent 的 claude-haiku-4-5）贴合到中转站真实 id
 # （如 claude-haiku-4-5-20251001）。首拉前为空 → 纯透传。
@@ -341,15 +347,18 @@ def openai_endpoint(base, suffix):
     return root + suffix
 
 
-def _upstream_auth_headers():
-    """上游鉴权头：按当前 provider 的 auth_style 装 x-api-key / bearer / both。
-    deepseek 未设 → 默认 x-api-key（保持原状）；relay = both。"""
-    style = PROV.get("auth_style", "x-api-key")
+def _upstream_auth_headers(prov=None, key=None):
+    """上游鉴权头：按 provider 的 auth_style 装 x-api-key / bearer / both。
+    deepseek 未设 → 默认 x-api-key（保持原状）；relay = both。
+    prov/key 参数用于多 provider 模式；省略时使用全局 PROV/KEY。"""
+    _p = prov or PROV
+    _k = key or KEY
+    style = _p.get("auth_style", "x-api-key")
     h = {}
     if style in ("x-api-key", "both"):
-        h["x-api-key"] = KEY
+        h["x-api-key"] = _k
     if style in ("bearer", "both"):
-        h["Authorization"] = f"Bearer {KEY}"
+        h["Authorization"] = f"Bearer {_k}"
     return h
 
 
@@ -425,6 +434,54 @@ def build_models_response():
     return 200, {"data": data, "has_more": False,
                  "first_id": data[0]["id"] if data else None,
                  "last_id": data[-1]["id"] if data else None}
+
+
+def build_multi_models_response():
+    """Merge models from all registered providers with prefixed IDs."""
+    all_models = []
+    for prefix, entry in sorted(MULTI_REGISTRY.items()):
+        prov = entry["prov"]
+        prov_name = entry["prov_name"]
+        for mid, display in prov.get("models", []):
+            prefixed_id = f"{prefix}-{mid}"
+            all_models.append({
+                "type": "model", "id": prefixed_id,
+                "display_name": display,
+                "supports_tools": True,
+                "created_at": "2026-01-01T00:00:00Z",
+            })
+        if prov.get("models_url"):
+            try:
+                tmp_key = entry["key"]
+                headers = {}
+                style = prov.get("auth_style", "x-api-key")
+                if style in ("x-api-key", "both"):
+                    headers["x-api-key"] = tmp_key
+                if style in ("bearer", "both"):
+                    headers["Authorization"] = f"Bearer {tmp_key}"
+                if prov_name == "relay":
+                    headers["anthropic-version"] = "2023-06-01"
+                raw = http_get_json(prov["models_url"], headers)
+                data_m = raw.get("data") if isinstance(raw, dict) else raw
+                for m in data_m or []:
+                    mid = m.get("id") if isinstance(m, dict) else None
+                    if not mid:
+                        continue
+                    prefixed_id = f"{prefix}-{mid}"
+                    sp = m.get("supported_parameters") if isinstance(m, dict) else None
+                    supports_tools = ("tools" in sp) if isinstance(sp, list) else None
+                    all_models.append({
+                        "type": "model", "id": prefixed_id,
+                        "display_name": (m.get("display_name") or mid),
+                        "supports_tools": supports_tools,
+                        "created_at": "2026-01-01T00:00:00Z",
+                    })
+            except Exception as e:
+                log(f"  multi-models: {prov_name} upstream failed: {e}")
+    log(f"GET /v1/models -> multi: {len(all_models)} models from {len(MULTI_REGISTRY)} providers")
+    return 200, {"data": all_models, "has_more": False,
+                 "first_id": all_models[0]["id"] if all_models else None,
+                 "last_id": all_models[-1]["id"] if all_models else None}
 
 
 # ---------- Anthropic -> OpenAI 翻译（qwen 路径） ----------
@@ -775,10 +832,18 @@ class H(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return
         if self.path.startswith("/v1/models"):
-            code, body = build_models_response()
+            if MULTI_MODE:
+                code, body = build_multi_models_response()
+            else:
+                code, body = build_models_response()
             self._send_json(code, body)
         elif self.path.startswith("/health"):
-            self._send_json(200, {"status": "ok", "provider": PROV_NAME})
+            if MULTI_MODE:
+                self._send_json(200, {"status": "ok", "mode": "multi",
+                                       "providers": list(MULTI_REGISTRY.keys()),
+                                       "default": DEFAULT_PREFIX})
+            else:
+                self._send_json(200, {"status": "ok", "provider": PROV_NAME})
         else:
             self._send_json(404, {"type": "error", "error": {"type": "not_found_error", "message": self.path}})
 
@@ -821,7 +886,9 @@ class H(BaseHTTPRequestHandler):
                                "n_tools": len(areq.get("tools") or [])}, _f, ensure_ascii=False, indent=2)
             except Exception:
                 pass
-        if PROV["mode"] == "anthropic":
+        if MULTI_MODE:
+            self._handle_multi(areq)
+        elif PROV["mode"] == "anthropic":
             self._handle_anthropic(areq)
         else:
             self._handle_openai(areq)
@@ -900,18 +967,64 @@ class H(BaseHTTPRequestHandler):
                 except Exception:
                     return
 
-    # ---- DeepSeek：Anthropic 原生透传（改模型名+换鉴权+夹 max_tokens+重试） ----
+    def _handle_multi(self, areq):
+        """Multi-provider router: parse model prefix, route to correct backend."""
+        model_id = areq.get("model", "")
+        prefix, bare_model = provider_policy.parse_prefixed_model(model_id)
+        if not prefix:
+            prefix = DEFAULT_PREFIX
+        entry = MULTI_REGISTRY.get(prefix)
+        if not entry:
+            self._send_json(400, {"type": "error", "error": {
+                "type": "invalid_request_error",
+                "message": f"unknown provider prefix '{prefix}' for model '{model_id}'"}})
+            return
+        areq_routed = dict(areq)
+        areq_routed["model"] = bare_model
+        _thread_ctx.prov = entry["prov"]
+        _thread_ctx.key = entry["key"]
+        _thread_ctx.prov_name = entry["prov_name"]
+        _thread_ctx.relay_force_model = entry.get("relay_force_model")
+        _thread_ctx.relay_models = entry.get("relay_models", [])
+        _thread_ctx.relay_thinking = entry.get("relay_thinking")
+        _thread_ctx.policy = entry.get("policy")
+        try:
+            if entry["prov"]["mode"] == "anthropic":
+                self._handle_anthropic(areq_routed)
+            else:
+                self._handle_openai(areq_routed)
+        finally:
+            for attr in ("prov", "key", "prov_name", "relay_force_model",
+                         "relay_models", "relay_thinking", "policy"):
+                if hasattr(_thread_ctx, attr):
+                    delattr(_thread_ctx, attr)
+
+    # ---- Anthropic native forwarding (DeepSeek / relay) ----
     def _handle_anthropic(self, areq):
-        state = _provider_state(areq)
+        _prov = getattr(_thread_ctx, "prov", None) or PROV
+        _key = getattr(_thread_ctx, "key", None) or KEY
+        _pname = getattr(_thread_ctx, "prov_name", None) or PROV_NAME
+        _policy = getattr(_thread_ctx, "policy", None)
+        _rfm = getattr(_thread_ctx, "relay_force_model", None)
+        _rm = getattr(_thread_ctx, "relay_models", None)
+        _rt = getattr(_thread_ctx, "relay_thinking", None)
+        if _policy:
+            state = provider_policy.ProviderState(
+                policy=_policy, prov_name=_pname,
+                relay_force_model=_rfm, relay_models=_rm or [],
+                relay_thinking=_rt, shim_mode=SHIM_MODE,
+                nonce_factory=lambda: f"{id(areq) & 0xffffff:x}",
+            )
+        else:
+            state = _provider_state(areq)
         upstream_body, ctx = anthropic_compat.transform_request(areq, state)
         stream = bool(upstream_body.get("stream"))
         n_tools = len(upstream_body.get("tools") or [])
         log(f"POST /v1/messages  {ctx.src_model}->{ctx.target_model} stream={stream} "
             f"tools={n_tools} msgs={len(upstream_body.get('messages') or [])}  "
-            f"(入站鉴权已剥离, 直连 {PROV_NAME})")
-        # 鉴权头按 provider 的 auth_style（deepseek x-api-key / relay both）。KEY 只驻内存、不入日志。
+            f"(入站鉴权已剥离, 直连 {_pname})")
         headers = {"content-type": "application/json", "anthropic-version": "2023-06-01"}
-        headers.update(_upstream_auth_headers())
+        headers.update(_upstream_auth_headers(prov=_prov, key=_key))
         data = json.dumps(upstream_body).encode()
         headers_sent = False
         try:
@@ -934,7 +1047,7 @@ class H(BaseHTTPRequestHandler):
                         self.wfile.write(hex(len(b))[2:].encode() + b"\r\n" + b + b"\r\n")
                         self.wfile.flush()
 
-                r, first, _ct = _open_stream_with_keepalive(_wc, PROV["url"], data, headers)
+                r, first, _ct = _open_stream_with_keepalive(_wc, _prov["url"], data, headers)
                 with r:
                     # off / 无工具 → None（骨架直接透传，零开销）；detect / rewrite → 统一 filter。
                     f = anthropic_compat.make_stream_rewriter(ctx)
@@ -966,12 +1079,12 @@ class H(BaseHTTPRequestHandler):
                 elif st.get("found"):
                     log(f"  <- {PROV_NAME} 流式透传 OK（!! detect：本响应含 DSML 泄漏，未改写）")
                 else:
-                    log(f"  <- {PROV_NAME} 流式透传 OK")
+                    log(f"  <- {_pname} 流式透传 OK")
             else:
-                body_bytes, ct = http_post(PROV["url"], data, headers)
+                body_bytes, ct = http_post(_prov["url"], data, headers)
                 body_bytes, stats = anthropic_compat.rewrite_nonstream(body_bytes, ctx)
                 if stats.get("rewritten"):
-                    log(f"  <- {PROV_NAME} 非流式 DSML 改写 OK（展开 tool_use）")
+                    log(f"  <- {_pname} 非流式 DSML 改写 OK（展开 tool_use）")
                 elif stats.get("found"):
                     log(f"  !! detect：非流式响应含 DSML 泄漏，未改写")
                 self.send_response(200)
@@ -981,7 +1094,7 @@ class H(BaseHTTPRequestHandler):
                 headers_sent = True
                 self.wfile.write(body_bytes)
                 if "rewritten" not in stats:
-                    log(f"  <- {PROV_NAME} 非流式透传 OK")
+                    log(f"  <- {_pname} 非流式透传 OK")
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:400]
             log(f"  !! 上游 HTTP {e.code}: {detail}")
@@ -1008,9 +1121,12 @@ class H(BaseHTTPRequestHandler):
 
     # ---- Qwen：翻译到 OpenAI，非流式取全再按需 SSE 回放 ----
     def _handle_openai(self, areq):
+        _prov = getattr(_thread_ctx, "prov", None) or PROV
+        _key = getattr(_thread_ctx, "key", None) or KEY
+        _pname = getattr(_thread_ctx, "prov_name", None) or PROV_NAME
         model_id = areq.get("model", "claude-sonnet-5")
         stream = bool(areq.get("stream"))
-        if PROV.get("api_format") == "openai_responses":
+        if _prov.get("api_format") == "openai_responses":
             oreq = anthropic_to_openai_responses(areq)
             msg_count = len(oreq.get("input") or [])
         else:
@@ -1018,13 +1134,13 @@ class H(BaseHTTPRequestHandler):
             msg_count = len(oreq.get("messages") or [])
         n_tools = len(oreq.get("tools", []))
         log(f"POST /v1/messages  {model_id}->{oreq['model']} stream={stream} tools={n_tools} "
-            f"msgs={msg_count}  (入站鉴权已剥离, {PROV_NAME})")
-        headers = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
+            f"msgs={msg_count}  (入站鉴权已剥离, {_pname})")
+        headers = {"Authorization": f"Bearer {_key}", "Content-Type": "application/json"}
         data = json.dumps(oreq).encode()
         try:
-            raw, _ct = http_post(PROV["url"], data, headers)
+            raw, _ct = http_post(_prov["url"], data, headers)
             oresp = json.loads(raw)
-            if PROV.get("api_format") == "openai_responses":
+            if _prov.get("api_format") == "openai_responses":
                 aresp = openai_responses_to_anthropic(oresp, model_id)
             else:
                 aresp = openai_to_anthropic(oresp, model_id)
@@ -1032,7 +1148,7 @@ class H(BaseHTTPRequestHandler):
                 self._replay_as_sse(aresp)
             else:
                 self._send_json(200, aresp)
-            log(f"  <- {PROV_NAME} OK (blocks={len(aresp['content'])} stop={aresp['stop_reason']})")
+            log(f"  <- {_pname} OK (blocks={len(aresp['content'])} stop={aresp['stop_reason']})")
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:400]
             log(f"  !! 上游 HTTP {e.code}: {detail}")
@@ -1086,6 +1202,8 @@ if __name__ == "__main__":
     ap.add_argument("--env-file", default=None)
     ap.add_argument("--log", default=None)
     ap.add_argument("--auth-token", default=None)
+    ap.add_argument("--multi-config", default=None,
+                    help="JSON file for multi-provider mode (output of config_helper multi-config)")
     ap.add_argument("--relay-base", default=None,
                     help="relay provider 的中转站 base_url（也可用环境变量 CSSWITCH_RELAY_BASE_URL）")
     ap.add_argument("--openai-base", default=None,
@@ -1133,10 +1251,49 @@ if __name__ == "__main__":
     if not KEY:
         print(f"找不到 {PROV['key_env']}。用环境变量或 --env-file <路径> 提供。", file=sys.stderr)
         sys.exit(1)
-    # DSML 兜底 shim 模式（默认 off；relay 恒 off；deepseek 且 dsml_capable 才读环境变量）。
-    SHIM_MODE = dsml_shim.shim_mode(PROV_NAME, PROV)
-    log(f"CSSwitch 代理启动 127.0.0.1:{args.port}  provider={PROV_NAME}  "
-        f"key=已加载(未显示)  上游={PROV['url']}  dsml_shim={SHIM_MODE}")
+    if args.multi_config:
+        MULTI_MODE = True
+        with open(args.multi_config) as f:
+            mc = json.load(f)
+        DEFAULT_PREFIX = mc.get("default_prefix", "")
+        for p_entry in mc.get("providers", []):
+            pfx = p_entry["prefix"]
+            tpl_id = p_entry["template_id"]
+            adapter = p_entry["adapter"]
+            tpl = PROVIDERS.get(adapter, {})
+            prov = dict(tpl)
+            prov["url"] = p_entry.get("base_url") or tpl.get("url") or ""
+            rfm = None
+            if adapter == "relay":
+                base = (p_entry.get("base_url") or "").strip().rstrip("/")
+                if base and re.match(r"^https?://", base):
+                    prov["url"] = base + "/v1/messages"
+                    prov["models_url"] = base + "/v1/models"
+                rfm = p_entry.get("model", "").strip() or None
+            elif adapter in ("openai-custom", "openai-responses"):
+                base = normalize_openai_base(p_entry.get("base_url") or "")
+                if base and re.match(r"^https?://", base):
+                    suffix = "/responses" if prov.get("api_format") == "openai_responses" else "/chat/completions"
+                    prov["url"] = openai_endpoint(base, suffix)
+                    prov["models_url"] = openai_endpoint(base, "/models")
+                rfm = p_entry.get("model", "").strip() or None
+            prov["mode"] = tpl.get("mode", "anthropic")
+            prov["key_env"] = p_entry.get("key_env", "")
+            pkey = p_entry.get("api_key", "")
+            pol = provider_policy.policy_from_prov(prov)
+            MULTI_REGISTRY[pfx] = {
+                "prov": prov, "key": pkey, "prov_name": tpl_id,
+                "policy": pol, "relay_force_model": rfm,
+                "relay_models": [], "relay_thinking": None,
+            }
+        PROV_NAME = "multi"
+        PROV = {"mode": "anthropic"}
+        log(f"CSSwitch 代理启动 127.0.0.1:{args.port}  mode=multi  "
+            f"providers={list(MULTI_REGISTRY.keys())}  default={DEFAULT_PREFIX}")
+    else:
+        SHIM_MODE = dsml_shim.shim_mode(PROV_NAME, PROV)
+        log(f"CSSwitch 代理启动 127.0.0.1:{args.port}  provider={PROV_NAME}  "
+            f"key=已加载(未显示)  上游={PROV['url']}  dsml_shim={SHIM_MODE}")
     # 绑定重试：上次会话遗留的孤儿代理可能还占着端口（app 侧会主动清，但退干净需一点时间）。
     # 重试 ~3s 等端口释放，避免一次绑不上就直接失败（Errno 48）。
     srv = None
