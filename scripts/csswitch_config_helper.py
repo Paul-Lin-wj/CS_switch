@@ -306,12 +306,15 @@ def cmd_multi_config(args):
     """
     cfg = load_config()
     templates = templates_by_id()
-    active_ids = cfg.get("active_providers", [])
-    if not active_ids:
-        # Fall back to single active_id
-        if cfg.get("active_id"):
-            active_ids = [cfg["active_id"]]
     profiles_by_id = {p["id"]: p for p in cfg.get("profiles", [])}
+    active_ids = cfg.get("active_providers", [])
+    # 清理指向不存在 profile 的过期 ID
+    active_ids = [pid for pid in active_ids if pid in profiles_by_id]
+    if not active_ids:
+        # 回退到 active_id
+        aid = cfg.get("active_id", "")
+        if aid and aid in profiles_by_id:
+            active_ids = [aid]
     providers = []
     for pid in active_ids:
         prof = profiles_by_id.get(pid)
@@ -334,7 +337,10 @@ def cmd_multi_config(args):
             "base_url_editable": tpl.get("base_url_editable", False),
             "requires_model": tpl.get("requires_model", False),
         })
-    default_pid = cfg.get("default_provider", "") or (active_ids[0] if active_ids else "")
+    default_pid = cfg.get("default_provider", "") or cfg.get("active_id", "") or (active_ids[0] if active_ids else "")
+    # 如果 default_provider 指向不存在的 profile，回退到 active_id 或第一个 active provider
+    if default_pid not in profiles_by_id:
+        default_pid = cfg.get("active_id", "") or (active_ids[0] if active_ids else "")
     default_prefix = ""
     if default_pid in profiles_by_id:
         default_prefix = prefix_for_template(profiles_by_id[default_pid].get("template_id", ""))
