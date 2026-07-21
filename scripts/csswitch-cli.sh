@@ -85,10 +85,161 @@ text_menu() {
 do_start() { msg "start (TODO)"; }
 do_stop() { msg "stop (TODO)"; }
 do_status() { msg "status (TODO)"; }
-do_switch() { msg "switch (TODO)"; }
-do_add() { msg "add (TODO)"; }
-do_edit() { msg "edit (TODO)"; }
-do_delete() { msg "delete (TODO)"; }
+do_switch() {
+  local profiles
+  profiles=$(run_helper list)
+  if [[ "$profiles" == "[]" ]]; then
+    err "还没有 provider，请先添加。"
+    return
+  fi
+  echo "=== 选择要切换的 provider ==="
+  local i=1
+  local ids=()
+  local names=()
+  while IFS= read -r line; do
+    local id name template model
+    id=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+    name=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+    template=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['template_id'])")
+    model=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin).get('model',''))")
+    echo "$i) $name [$template] ${model:+model=$model}"
+    ids+=("$id")
+    names+=("$name")
+    i=$((i+1))
+  done < <( echo "$profiles" | python3 -c "import sys,json; [print(json.dumps(p)) for p in json.load(sys.stdin)]" )
+  echo -n "请输入编号: "
+  read -r idx
+  if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#ids[@]} )); then
+    err "无效编号"
+    return
+  fi
+  local chosen="${ids[$((idx-1))]}"
+  run_helper set-active "$chosen"
+  msg "已切换到: ${names[$((idx-1))]}"
+}
+
+do_add() {
+  local templates
+  templates=$(run_helper templates)
+  echo "=== 选择 provider 模板 ==="
+  local i=1
+  local ids=()
+  local names=()
+  while IFS= read -r line; do
+    local id name
+    id=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+    name=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+    echo "$i) $name"
+    ids+=("$id")
+    names+=("$name")
+    i=$((i+1))
+  done < <( echo "$templates" | python3 -c "import sys,json; [print(json.dumps(t)) for t in json.load(sys.stdin)]" )
+  echo -n "请输入编号: "
+  read -r idx
+  if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#ids[@]} )); then
+    err "无效编号"
+    return
+  fi
+  local tpl="${ids[$((idx-1))]}"
+  local tpl_name="${names[$((idx-1))]}"
+
+  local base_url_editable requires_model
+  base_url_editable=$(echo "$templates" | python3 -c "import sys,json; t=[x for x in json.load(sys.stdin) if x['id']=='$tpl'][0]; print('1' if t['base_url_editable'] else '')")
+  requires_model=$(echo "$templates" | python3 -c "import sys,json; t=[x for x in json.load(sys.stdin) if x['id']=='$tpl'][0]; print('1' if t['requires_model'] else '')")
+
+  echo -n "显示名称: "
+  read -r name
+  echo -n "API Key: "
+  read -rs key
+  echo
+  local base_url_arg=""
+  if [[ "$base_url_editable" == "1" ]]; then
+    echo -n "Base URL: "
+    read -r base_url
+    base_url_arg="--base-url $base_url"
+  fi
+  local model_arg=""
+  if [[ "$requires_model" == "1" ]]; then
+    echo -n "模型名: "
+    read -r model
+    model_arg="--model $model"
+  fi
+  run_helper add --template "$tpl" --name "$name" --key "$key" $base_url_arg $model_arg
+  msg "已添加并激活: $name [$tpl_name]"
+}
+
+do_edit() {
+  local profiles
+  profiles=$(run_helper list)
+  echo "=== 选择要编辑的 provider ==="
+  local i=1
+  local ids=()
+  local names=()
+  while IFS= read -r line; do
+    local id name
+    id=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+    name=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+    echo "$i) $name"
+    ids+=("$id")
+    names+=("$name")
+    i=$((i+1))
+  done < <( echo "$profiles" | python3 -c "import sys,json; [print(json.dumps(p)) for p in json.load(sys.stdin)]" )
+  echo -n "请输入编号: "
+  read -r idx
+  if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#ids[@]} )); then
+    err "无效编号"
+    return
+  fi
+  local pid="${ids[$((idx-1))]}"
+  echo -n "新显示名称 (留空不变): "
+  read -r name
+  echo -n "新 API Key (留空不变): "
+  read -rs key
+  echo
+  echo -n "新 Base URL (留空不变): "
+  read -r base_url
+  echo -n "新模型名 (留空不变): "
+  read -r model
+  local args=()
+  [[ -n "$name" ]] && args+=("--name" "$name")
+  [[ -n "$key" ]] && args+=("--key" "$key")
+  [[ -n "$base_url" ]] && args+=("--base-url" "$base_url")
+  [[ -n "$model" ]] && args+=("--model" "$model")
+  run_helper edit "$pid" "${args[@]}"
+  msg "已更新: ${names[$((idx-1))]}"
+}
+
+do_delete() {
+  local profiles
+  profiles=$(run_helper list)
+  echo "=== 选择要删除的 provider ==="
+  local i=1
+  local ids=()
+  local names=()
+  while IFS= read -r line; do
+    local id name
+    id=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+    name=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+    echo "$i) $name"
+    ids+=("$id")
+    names+=("$name")
+    i=$((i+1))
+  done < <( echo "$profiles" | python3 -c "import sys,json; [print(json.dumps(p)) for p in json.load(sys.stdin)]" )
+  echo -n "请输入编号: "
+  read -r idx
+  if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#ids[@]} )); then
+    err "无效编号"
+    return
+  fi
+  echo -n "确认删除 ${names[$((idx-1))]}? [y/N] "
+  read -r confirm
+  if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+    msg "已取消删除。"
+    return
+  fi
+  run_helper delete "${ids[$((idx-1))]}"
+  msg "已删除。"
+}
 do_login_url() { msg "login url (TODO)"; }
 do_doctor() { msg "doctor (TODO)"; }
 
