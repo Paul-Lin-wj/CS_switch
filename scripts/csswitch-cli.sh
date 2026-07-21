@@ -14,8 +14,15 @@ SANDBOX_HOME="${SANDBOX_HOME:-$CSSWITCH_DIR/sandbox/home}"
 DATA_DIR="$SANDBOX_HOME/.claude-science"
 
 # Detect UI tool: prefer dialog, then whiptail, then text.
+# Environment override (e.g. CSSWITCH_UI=text) for non-interactive/testing use.
 UI_TOOL=""
-if command -v dialog &>/dev/null; then
+if [[ -n "${CSSWITCH_UI:-}" ]]; then
+  if [[ "$CSSWITCH_UI" == "text" ]]; then
+    UI_TOOL=""
+  else
+    UI_TOOL="$CSSWITCH_UI"
+  fi
+elif command -v dialog &>/dev/null; then
   UI_TOOL="dialog"
 elif command -v whiptail &>/dev/null; then
   UI_TOOL="whiptail"

@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 fail=0
 echo "== bash scripts =="
 bash test/test_scripts.sh || fail=1
+echo "== csswitch-cli integration =="
+bash test/test_csswitch_cli.sh || fail=1
 echo "== node oauth 对拍 =="
 if command -v node >/dev/null 2>&1; then
   node --test test/test_make_virtual_oauth.mjs || fail=1
