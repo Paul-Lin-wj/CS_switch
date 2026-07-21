@@ -11,7 +11,7 @@ echo "== csswitch-cli integration tests =="
 
 # --- 1. Init creates dirs and config with correct perms ---
 CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
-9
+10
 0
 EOF
 [[ -d "$T/c1/logs" ]] || { echo "FAIL: logs dir not created"; exit 1; }
@@ -30,7 +30,7 @@ active=$(CSSWITCH_CONFIG="$T/c1/config.json" python3 "$HELPER" active | python3 
 
 # --- 3. Status reports stopped, shows active profile, no key leak ---
 out=$(CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
-3
+4
 0
 EOF
 )
@@ -43,7 +43,7 @@ echo "$out" | grep -q "sk-test123" && { echo "FAIL: full API key leaked in statu
 CSSWITCH_CONFIG="$T/c1/config.json" python3 "$HELPER" delete \
   "$(CSSWITCH_CONFIG="$T/c1/config.json" python3 "$HELPER" list | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")" >/dev/null
 out2=$(CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
-3
+4
 0
 EOF
 )
@@ -70,7 +70,7 @@ CSSWITCH_CONFIG="$T/c1/config.json" CSSWITCH_PROVIDER=relay CSSWITCH_ADAPTER=rel
 
 # --- 8. Stop handles missing Science binary gracefully ---
 out4=$(CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF' 2>&1
-2
+3
 0
 EOF
 )
@@ -98,7 +98,7 @@ sec=$(CSSWITCH_CONFIG="$T/c1/config.json" python3 "$HELPER" load | python3 -c "i
 
 # --- 11. Status does not leak secret ---
 out5=$(CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
-3
+4
 0
 EOF
 )

@@ -62,15 +62,16 @@ text_menu() {
     echo
     echo "=== CSSwitch-Linux CLI ==="
     echo "1) 启动 CSSwitch（代理 + 沙箱）"
-    echo "2) 停止 CSSwitch"
-    echo "3) 查看运行状态"
-    echo "4) 切换 API 服务商 / profile"
-    echo "5) 添加新的 API 提供商"
-    echo "6) 编辑 provider 配置"
-    echo "7) 删除 provider"
-    echo "8) 输出登录链接"
-    echo "9) 初始化 CSSwitch 目录"
-    echo "10) 运行诊断"
+    echo "2) 多 provider 启动（从 Claude Code settings.json 导入）"
+    echo "3) 停止 CSSwitch"
+    echo "4) 查看运行状态"
+    echo "5) 切换 API 服务商 / profile"
+    echo "6) 添加新的 API 提供商"
+    echo "7) 编辑 provider 配置"
+    echo "8) 删除 provider"
+    echo "9) 输出登录链接"
+    echo "10) 初始化 CSSwitch 目录"
+    echo "11) 运行诊断"
     echo "0) 退出"
     echo -n "请选择: "
     if ! read -r choice; then
@@ -80,15 +81,16 @@ text_menu() {
     fi
     case "$choice" in
       1) do_start ;;
-      2) do_stop ;;
-      3) do_status ;;
-      4) do_switch ;;
-      5) do_add ;;
-      6) do_edit ;;
-      7) do_delete ;;
-      8) do_login_url ;;
-      9) do_init ;;
-      10) do_doctor ;;
+      2) do_start_multi ;;
+      3) do_stop ;;
+      4) do_status ;;
+      5) do_switch ;;
+      6) do_add ;;
+      7) do_edit ;;
+      8) do_delete ;;
+      9) do_login_url ;;
+      10) do_init ;;
+      11) do_doctor ;;
       0) echo "再见。"; exit 0 ;;
       *) echo "无效选项，请重新选择。" ;;
     esac
@@ -136,6 +138,118 @@ sandbox_running() {
   bin=$(find_science_bin) || return 1
   HOME="$SANDBOX_HOME" "$bin" status --data-dir "$DATA_DIR" 2>/dev/null | grep -q '"running": *true'
 }
+
+# Import API configs from Claude Code settings.json files into CSSwitch profiles.
+# Reads ~/.claude/settings.json, settings.json.kimi, settings.json.bak etc.
+do_import_settings() {
+  local claude_dir="$HOME/.claude"
+  if [[ ! -d "$claude_dir" ]]; then
+    err "未找到 $claude_dir 目录"
+    return 1
+  fi
+
+  local imported=0
+  local profile_ids=()
+
+  # Scan all settings.json* files
+  for f in "$claude_dir"/settings.json "$claude_dir"/settings.json.*; do
+    [[ -f "$f" ]] || continue
+    [[ -s "$f" ]] || continue
+    [[ "$f" == *.bak ]] && continue
+
+    # Extract provider info from the settings file
+    local info
+    info=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    env = d.get('env', {})
+    base_url = env.get('ANTHROPIC_BASE_URL', '')
+    token = env.get('ANTHROPIC_AUTH_TOKEN', '')
+    model = env.get('ANTHROPIC_MODEL', '')
+    if not base_url or not token:
+        sys.exit(1)
+    # Determine template based on URL
+    if 'kimi' in base_url.lower() or 'moonshot' in base_url.lower():
+        tpl = 'kimi'
+    elif 'bigmodel' in base_url.lower() or 'zhipu' in base_url.lower() or 'glm' in base_url.lower():
+        sys.exit(1)  # skip GLM
+    elif 'xiaomimimo' in base_url.lower() or 'mimo' in base_url.lower():
+        tpl = 'relay'
+    elif 'deepseek' in base_url.lower():
+        tpl = 'deepseek'
+    elif 'dashscope' in base_url.lower() or 'qwen' in base_url.lower():
+        tpl = 'qwen'
+    elif 'minimax' in base_url.lower():
+        tpl = 'minimax'
+    elif 'openrouter' in base_url.lower():
+        tpl = 'openrouter'
+    else:
+        tpl = 'relay'
+    # Derive a name from filename
+    fname = sys.argv[1].split('/')[-1]
+    name = fname.replace('settings.json', '').strip('.') or 'default'
+    print(json.dumps({'name': name, 'template_id': tpl, 'base_url': base_url,
+                       'api_key': token, 'model': model}))
+except Exception as e:
+    sys.exit(1)
+" "$f" 2>/dev/null) || continue
+
+    local name tpl_id base_url api_key model
+    name=$(echo "$info" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+    tpl_id=$(echo "$info" | python3 -c "import sys,json; print(json.load(sys.stdin)['template_id'])")
+    base_url=$(echo "$info" | python3 -c "import sys,json; print(json.load(sys.stdin)['base_url'])")
+    api_key=$(echo "$info" | python3 -c "import sys,json; print(json.load(sys.stdin)['api_key'])")
+    model=$(echo "$info" | python3 -c "import sys,json; print(json.load(sys.stdin)['model'])")
+
+    # Check if this profile already exists (by name)
+    local existing
+    existing=$(run_helper list 2>/dev/null | python3 -c "
+import sys, json
+try:
+    profiles = json.load(sys.stdin)
+    for p in profiles:
+        if p['name'] == sys.argv[1]:
+            print(p['id']); break
+    else:
+        print('')
+except: print('')
+" "$name" 2>/dev/null)
+
+    if [[ -n "$existing" ]]; then
+      profile_ids+=("$existing")
+      msg "已存在: $name ($tpl_id) — 跳过"
+    else
+      local add_args=(--template "$tpl_id" --name "$name" --key "$api_key")
+      [[ -n "$base_url" && "$tpl_id" == "relay" ]] && add_args+=(--base-url "$base_url")
+      [[ -n "$model" ]] && add_args+=(--model "$model")
+      local result
+      result=$(run_helper add "${add_args[@]}" 2>/dev/null)
+      local pid
+      pid=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+      if [[ -n "$pid" ]]; then
+        profile_ids+=("$pid")
+        msg "已导入: $name ($tpl_id) ← $f"
+        imported=$((imported + 1))
+      else
+        err "导入失败: $f"
+      fi
+    fi
+  done
+
+  if [[ ${#profile_ids[@]} -lt 2 ]]; then
+    err "至少需要 2 个不同的 provider 才能使用多 provider 模式（当前 ${#profile_ids[@]} 个）"
+    return 1
+  fi
+
+  # Set active providers
+  local ids_csv
+  ids_csv=$(IFS=,; echo "${profile_ids[*]}")
+  run_helper set-active-providers "$ids_csv" >/dev/null
+  msg "已激活 ${#profile_ids[@]} 个 provider，模式切换为 multi"
+  return 0
+}
+
 
 do_start() {
   local cfg proxy_port sandbox_port secret
@@ -352,6 +466,45 @@ with open('$env_file', 'w') as f:
   echo "  http://localhost:${sandbox_port}"
   echo ""
   do_login_url
+}
+
+do_start_multi() {
+  msg "=== 多 Provider 启动 ==="
+
+  # Ensure config dir exists
+  if [[ ! -d "$CSSWITCH_DIR" ]]; then
+    err "CSSwitch 目录不存在，请先初始化（选项 9）"
+    return
+  fi
+
+  # Import settings from Claude Code if no multi-provider config yet
+  local current_mode
+  current_mode=$(run_helper load 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('mode','proxy'))" 2>/dev/null)
+
+  if [[ "$current_mode" != "multi" ]]; then
+    msg "从 Claude Code settings.json 导入 API 配置..."
+    if ! do_import_settings; then
+      err "导入失败。请先手动添加至少 2 个 provider（选项 5），然后用 set-active-providers 激活。"
+      return
+    fi
+  fi
+
+  # Show current multi-provider config
+  local mc n_providers default_prefix
+  mc=$(run_helper multi-config 2>/dev/null)
+  n_providers=$(echo "$mc" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('providers',[])))")
+  default_prefix=$(echo "$mc" | python3 -c "import sys,json; print(json.load(sys.stdin).get('default_prefix',''))")
+
+  msg "已配置 $n_providers 个 provider，默认: $default_prefix"
+  echo "$mc" | python3 -c '
+import sys, json
+mc = json.load(sys.stdin)
+for p in mc.get("providers", []):
+    print("  " + p["prefix"] + ": " + p["name"] + " (" + p["template_id"] + ")")
+'
+
+  # Launch using do_start (which detects mode=multi automatically)
+  do_start
 }
 
 print_access_info() {
@@ -626,29 +779,31 @@ tui_menu() {
     if [[ "$UI_TOOL" == "dialog" ]]; then
       dialog --clear --title "CSSwitch-Linux CLI" --menu "选择操作" "$height" "$width" 10 \
         1 "启动 CSSwitch" \
-        2 "停止 CSSwitch" \
-        3 "查看运行状态" \
-        4 "切换 API 服务商" \
-        5 "添加新的 API 提供商" \
-        6 "编辑 provider 配置" \
-        7 "删除 provider" \
-        8 "输出登录链接" \
-        9 "初始化 CSSwitch 目录" \
-        10 "运行诊断" \
+        2 "多 provider 启动" \
+        3 "停止 CSSwitch" \
+        4 "查看运行状态" \
+        5 "切换 API 服务商" \
+        6 "添加新的 API 提供商" \
+        7 "编辑 provider 配置" \
+        8 "删除 provider" \
+        9 "输出登录链接" \
+        10 "初始化 CSSwitch 目录" \
+        11 "运行诊断" \
         0 "退出" \
         2>"$choice_file" || true
     else
       whiptail --title "CSSwitch-Linux CLI" --menu "选择操作" "$height" "$width" 10 \
         1 "启动 CSSwitch" \
-        2 "停止 CSSwitch" \
-        3 "查看运行状态" \
-        4 "切换 API 服务商" \
-        5 "添加新的 API 提供商" \
-        6 "编辑 provider 配置" \
-        7 "删除 provider" \
-        8 "输出登录链接" \
-        9 "初始化 CSSwitch 目录" \
-        10 "运行诊断" \
+        2 "多 provider 启动" \
+        3 "停止 CSSwitch" \
+        4 "查看运行状态" \
+        5 "切换 API 服务商" \
+        6 "添加新的 API 提供商" \
+        7 "编辑 provider 配置" \
+        8 "删除 provider" \
+        9 "输出登录链接" \
+        10 "初始化 CSSwitch 目录" \
+        11 "运行诊断" \
         0 "退出" \
         2>"$choice_file" || true
     fi
@@ -658,15 +813,16 @@ tui_menu() {
     case "$choice" in
       0) clear; echo "再见。"; exit 0 ;;
       1) clear; do_start ;;
-      2) clear; do_stop ;;
-      3) clear; do_status ;;
-      4) clear; do_switch ;;
-      5) clear; do_add ;;
-      6) clear; do_edit ;;
-      7) clear; do_delete ;;
-      8) clear; do_login_url ;;
-      9) clear; do_init ;;
-      10) clear; do_doctor ;;
+      2) clear; do_start_multi ;;
+      3) clear; do_stop ;;
+      4) clear; do_status ;;
+      5) clear; do_switch ;;
+      6) clear; do_add ;;
+      7) clear; do_edit ;;
+      8) clear; do_delete ;;
+      9) clear; do_login_url ;;
+      10) clear; do_init ;;
+      11) clear; do_doctor ;;
     esac
     [[ "$choice" != "0" ]] && { echo "按 Enter 继续..."; read -r; }
   done
