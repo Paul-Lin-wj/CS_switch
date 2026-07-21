@@ -129,9 +129,36 @@ if (fs.existsSync(keyFile) && !force) {
 const keyBlob = KEY_NAMES.map((k) => `${k}=${keys[k]}`).join("\n") + "\n";
 safeWrite(keyFile, keyBlob, 0o600);
 
-// —— 令牌 blob（明文），字段对齐 _adapt / _tryOauthToken ——
-const accountUuid = crypto.randomUUID();
-const orgUuid = crypto.randomUUID();
+// —— 令牌 blob（明文），字段对径 _adapt / _tryOauthToken ——
+// 复用已有的 account/org UUID：首次运行随机生成，后续启动保持一致，
+// 避免 Science 每次重启都看到「新用户」导致项目/对话丢失。
+const tokDir = path.join(resolvedAuth, ".oauth-tokens");
+let accountUuid = crypto.randomUUID();
+let orgUuid = crypto.randomUUID();
+try {
+  if (fs.existsSync(tokDir)) {
+    for (const f of fs.readdirSync(tokDir)) {
+      if (!f.endsWith(".enc")) continue;
+      // 从已有 .enc 文件名恢复 account UUID（文件名 = sanitized uuid + ".enc"）
+      const restored = f.replace(/\.enc$/, "");
+      if (/^[a-zA-Z0-9_-]+$/.test(restored)) {
+        accountUuid = restored;
+        break;
+      }
+    }
+  }
+} catch {}
+// 从 active-org.json 恢复 org UUID
+const orgFile = path.join(resolvedAuth, "active-org.json");
+try {
+  if (fs.existsSync(orgFile)) {
+    assertNotSymlink(orgFile);
+    const parsed = JSON.parse(fs.readFileSync(orgFile, "utf-8"));
+    if (parsed.org_uuid && typeof parsed.org_uuid === "string") {
+      orgUuid = parsed.org_uuid;
+    }
+  }
+} catch {}
 const blob = {
   access_token: "sk-ant-virtual-" + crypto.randomBytes(24).toString("hex"), // 代理会剥离，值任意
   refresh_token: "",
@@ -165,7 +192,6 @@ function encryptTokenV2(plaintext, oauthKeyB64) {
 const encFileBody = encryptTokenV2(JSON.stringify(blob), keys.OAUTH_ENCRYPTION_KEY);
 
 // —— 写 .oauth-tokens/<sanitized uuid>.enc；清掉其它 .enc 保证唯一 ——
-const tokDir = path.join(resolvedAuth, ".oauth-tokens");
 // tokDir 本身也要拒绝符号链接：resolvedAuth 已经被 realAncestor 看穿，
 // 但 tokDir 若是预置的符号链接（指向沙箱外，最坏情况是真实 ~/.claude-science/.oauth-tokens），
 // 后续 mkdirSync/chmodSync/readdirSync/unlink/safeWrite 都会原样跟随中间路径分量指向的目录，

@@ -212,7 +212,7 @@ do_start() {
   fi
 
   mkdir -p "$CSSWITCH_DIR/logs"
-  env "${env_vars[@]}" python3 "$script" \
+  nohup env "${env_vars[@]}" python3 "$script" \
     --provider "$adapter" \
     --port "$proxy_port" \
     --auth-token "$secret" \
