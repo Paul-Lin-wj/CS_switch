@@ -59,9 +59,10 @@ if [[ ! -d "$DATA_DIR/bin" ]]; then
     if [[ -d "$REAL_DIR/$asset" ]]; then
       echo "  复制 $asset ..."
       if [[ "$asset" == "conda" ]]; then
-        # conda pkgs/ 里存在跨包相对符号链接（如 gcc 包指向 binutils），
-        # 在 pkgs 缓存中是断链；cp -rL 会因此失败。conda 目录只保留符号链接。
-        cp -r "$REAL_DIR/$asset" "$DATA_DIR/$asset"
+        # conda 目录 ~6GB（pkgs 5.5G + envs 4.7G，hardlink 共享）。
+        # cp -r/rsync 在 WSL2/NTFS 上要数分钟。用符号链接避免复制：
+        # 沙箱读取 conda 时走真实路径，但沙箱 HOME/data-dir 仍是隔离的。
+        ln -sfn "$REAL_DIR/$asset" "$DATA_DIR/$asset"
       else
         cp -rL "$REAL_DIR/$asset" "$DATA_DIR/$asset"
       fi
