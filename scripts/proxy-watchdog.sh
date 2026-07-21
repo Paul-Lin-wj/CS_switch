@@ -16,7 +16,6 @@ PROXY_SCRIPT="${PROXY_SCRIPT:?}"
 PROXY_PORT="${PROXY_PORT:?}"
 PROXY_SECRET="${PROXY_SECRET:?}"
 PROXY_ADAPTER="${PROXY_ADAPTER:?}"
-PROXY_MULTI_CONFIG="${PROXY_MULTI_CONFIG:-}"
 PROXY_LOG="${PROXY_LOG:-/dev/null}"
 
 MAX_RETRIES=50          # 最大连续重启次数（防止无限循环）
@@ -30,29 +29,17 @@ retry=0
 port_retry=0
 delay="$BASE_DELAY"
 
-kill_port_occupant() {
-  local pids
-  pids=$(ss -tlnp "sport = :${PROXY_PORT}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
-  if [[ -n "$pids" ]]; then
-    echo "[$(date '+%H:%M:%S')] 端口 $PROXY_PORT 被占用 (pids=$pids)，尝试杀死..." >> "$PROXY_LOG"
-    echo "$pids" | xargs kill -9 2>/dev/null || true
-    sleep 1
-  fi
-}
-
 while (( retry < MAX_RETRIES )); do
   echo "[$(date '+%H:%M:%S')] 代理启动 (attempt=$((retry+1)), adapter=$PROXY_ADAPTER, port=$PROXY_PORT)" >> "$PROXY_LOG"
 
   start_time=$(date +%s)
 
   # 启动代理（前台运行，捕获退出码）
-  local proxy_cmd=(python3 "$PROXY_SCRIPT" --port "$PROXY_PORT" --auth-token "$PROXY_SECRET")
-  if [[ -n "$PROXY_MULTI_CONFIG" && -f "$PROXY_MULTI_CONFIG" ]]; then
-    proxy_cmd+=(--multi-config "$PROXY_MULTI_CONFIG")
-  else
-    proxy_cmd+=(--provider "$PROXY_ADAPTER")
-  fi
-  "${proxy_cmd[@]}" >> "$PROXY_LOG" 2>&1 &
+  python3 "$PROXY_SCRIPT" \
+    --provider "$PROXY_ADAPTER" \
+    --port "$PROXY_PORT" \
+    --auth-token "$PROXY_SECRET" \
+    >> "$PROXY_LOG" 2>&1 &
   proxy_pid=$!
 
   # 等待代理进程退出
@@ -79,8 +66,13 @@ while (( retry < MAX_RETRIES )); do
       exit 1
     fi
     echo "[$(date '+%H:%M:%S')] 疑似端口占用 (exit=$exit_code, runtime=${runtime}s)，尝试清理..." >> "$PROXY_LOG"
-    kill_port_occupant
-    # 端口占用退避较短
+    # 尝试杀死占用端口的进程
+    pids=$(ss -tlnp "sport = :${PROXY_PORT}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
+    if [[ -n "$pids" ]]; then
+      echo "[$(date '+%H:%M:%S')] 杀死端口占用进程: $pids" >> "$PROXY_LOG"
+      echo "$pids" | xargs kill -9 2>/dev/null || true
+      sleep 1
+    fi
     sleep 2
     continue
   fi
