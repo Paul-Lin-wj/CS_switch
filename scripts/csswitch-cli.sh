@@ -81,10 +81,200 @@ text_menu() {
   done
 }
 
-# Stub implementations; filled in later tasks.
-do_start() { msg "start (TODO)"; }
-do_stop() { msg "stop (TODO)"; }
-do_status() { msg "status (TODO)"; }
+find_science_bin() {
+  if [[ -n "${SCIENCE_BIN:-}" ]]; then
+    echo "$SCIENCE_BIN"
+    return 0
+  fi
+  local candidates=(
+    "$DATA_DIR/bin/claude-science"
+    "$HOME/.local/bin/claude-science"
+    "/usr/bin/claude-science"
+    "/usr/local/bin/claude-science"
+    "/opt/claude-science/claude-science"
+  )
+  for c in "${candidates[@]}"; do
+    if [[ -x "$c" ]]; then
+      echo "$c"
+      return 0
+    fi
+  done
+  if command -v claude-science &>/dev/null; then
+    echo "$(command -v claude-science)"
+    return 0
+  fi
+  return 1
+}
+
+proxy_health() {
+  local port secret
+  port=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin)['proxy_port'])")
+  secret=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin).get('secret',''))")
+  if [[ -z "$secret" ]]; then
+    return 1
+  fi
+  curl -fsS -m 1 "http://127.0.0.1:$port/$secret/health" &>/dev/null
+}
+
+sandbox_health() {
+  local port
+  port=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin)['sandbox_port'])")
+  curl -fsS -m 1 "http://127.0.0.1:$port/health" &>/dev/null
+}
+
+sandbox_running() {
+  local bin
+  bin=$(find_science_bin) || return 1
+  HOME="$SANDBOX_HOME" "$bin" status --data-dir "$DATA_DIR" 2>/dev/null | grep -q '"running": *true'
+}
+
+do_start() {
+  local cfg proxy_port sandbox_port secret
+  cfg=$(run_helper load)
+  proxy_port=$(echo "$cfg" | python3 -c "import sys,json; print(json.load(sys.stdin)['proxy_port'])")
+  sandbox_port=$(echo "$cfg" | python3 -c "import sys,json; print(json.load(sys.stdin)['sandbox_port'])")
+  secret=$(echo "$cfg" | python3 -c "import sys,json; print(json.load(sys.stdin).get('secret',''))")
+
+  if [[ "$proxy_port" == "8000" || "$sandbox_port" == "8000" ]]; then
+    err "端口 8000 是真实 Science 保留端口，请在配置中修改。"
+    return
+  fi
+
+  local active
+  active=$(run_helper active 2>/dev/null || true)
+  if [[ -z "$active" || "$active" == "无" ]]; then
+    err "没有生效的 provider，请先添加或切换。"
+    return
+  fi
+
+  local template_id key key_env adapter base_url model api_format
+  template_id=$(echo "$active" | python3 -c "import sys,json; print(json.load(sys.stdin)['template_id'])")
+  key=$(echo "$active" | python3 -c "import sys,json; print(json.load(sys.stdin).get('api_key',''))")
+  base_url=$(echo "$active" | python3 -c "import sys,json; print(json.load(sys.stdin).get('base_url',''))")
+  model=$(echo "$active" | python3 -c "import sys,json; print(json.load(sys.stdin).get('model',''))")
+  api_format=$(echo "$active" | python3 -c "import sys,json; print(json.load(sys.stdin).get('api_format',''))")
+
+  if [[ -z "$key" ]]; then
+    err "生效 profile 缺少 API Key，请先编辑。"
+    return
+  fi
+
+  # Determine adapter and key env from template registry.
+  local adapter key_env base_editable requires_model
+  adapter=$(run_helper templates | python3 -c "import sys,json; t=[x for x in json.load(sys.stdin) if x['id']=='$template_id'][0]; print(t['adapter'])")
+  key_env=$(run_helper templates | python3 -c "import sys,json; t=[x for x in json.load(sys.stdin) if x['id']=='$template_id'][0]; print(t['key_env'])")
+  base_editable=$(run_helper templates | python3 -c "import sys,json; t=[x for x in json.load(sys.stdin) if x['id']=='$template_id'][0]; print('1' if t['base_url_editable'] else '')")
+  requires_model=$(run_helper templates | python3 -c "import sys,json; t=[x for x in json.load(sys.stdin) if x['id']=='$template_id'][0]; print('1' if t['requires_model'] else '')")
+
+  if [[ "$base_editable" == "1" && -z "$base_url" ]]; then
+    err "该 provider 需要 base_url，请先编辑配置。"
+    return
+  fi
+  if [[ "$requires_model" == "1" && -z "$model" ]]; then
+    err "该 provider 需要 model，请先编辑配置。"
+    return
+  fi
+
+  # Generate secret if missing.
+  if [[ -z "$secret" ]]; then
+    secret=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+    python3 - <<EOF
+import json, os
+p = os.path.expanduser("$CSSWITCH_DIR/config.json")
+with open(p) as f:
+    cfg = json.load(f)
+cfg['secret'] = "$secret"
+with open(p, "w") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+EOF
+  fi
+
+  # Kill old proxy on same port.
+  local script="$PROJ/proxy/csswitch_proxy.py"
+  pkill -f "${script}.*--port ${proxy_port}" || true
+
+  msg "启动代理 (adapter=$adapter, port=$proxy_port)..."
+  local env_args=("$key_env=$key")
+  if [[ "$adapter" == "relay" ]]; then
+    [[ -n "$base_url" ]] && env_args+=("CSSWITCH_RELAY_BASE_URL=$base_url")
+    [[ -n "$model" ]] && env_args+=("CSSWITCH_RELAY_MODEL=$model")
+  elif [[ "$adapter" == "openai-custom" ]]; then
+    env_args+=("CSSWITCH_OPENAI_BASE_URL=$base_url")
+    [[ -n "$model" ]] && env_args+=("CSSWITCH_OPENAI_MODEL=$model")
+  elif [[ "$adapter" == "openai-responses" ]]; then
+    env_args+=("CSSWITCH_OPENAI_BASE_URL=$base_url")
+    [[ -n "$model" ]] && env_args+=("CSSWITCH_OPENAI_MODEL=$model")
+  fi
+
+  mkdir -p "$CSSWITCH_DIR/logs"
+  env "${env_args[@]}" python3 "$script" \
+    --provider "$adapter" \
+    --port "$proxy_port" \
+    --auth-token "$secret" \
+    >> "$CSSWITCH_DIR/logs/proxy-cli.log" 2>&1 &
+  local proxy_pid=$!
+
+  msg "等待代理就绪..."
+  local ok=0
+  for _ in $(seq 1 40); do
+    if curl -fsS -m 1 "http://127.0.0.1:$proxy_port/$secret/health" &>/dev/null; then
+      ok=1
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ "$ok" == "0" ]]; then
+    err "代理启动失败或探活超时，查看 $CSSWITCH_DIR/logs/proxy-cli.log"
+    kill "$proxy_pid" 2>/dev/null || true
+    return
+  fi
+
+  msg "启动沙箱 (port=$sandbox_port)..."
+  SANDBOX_HOME="$SANDBOX_HOME" "$LAUNCH" \
+    --port "$sandbox_port" \
+    --proxy-url "http://127.0.0.1:$proxy_port/$secret" \
+    --skip-oauth-forge
+
+  msg "等待沙箱就绪..."
+  ok=0
+  for _ in $(seq 1 80); do
+    if curl -fsS -m 1 "http://127.0.0.1:$sandbox_port/health" &>/dev/null; then
+      ok=1
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ "$ok" == "0" ]]; then
+    err "沙箱启动后探活超时。"
+    return
+  fi
+
+  do_login_url
+}
+
+do_stop() {
+  msg "停止沙箱..."
+  SANDBOX_HOME="$SANDBOX_HOME" "$STOP" || true
+  msg "停止代理..."
+  local port
+  port=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin)['proxy_port'])")
+  local script="$PROJ/proxy/csswitch_proxy.py"
+  pkill -f "${script}.*--port ${port}" || true
+  msg "已停止。"
+}
+
+do_status() {
+  local proxy_status="未运行"
+  local sandbox_status="未运行"
+  proxy_health && proxy_status="运行中"
+  sandbox_running && sandbox_status="运行中"
+  local active
+  active=$(run_helper active 2>/dev/null || echo "无")
+  echo "=== 运行状态 ==="
+  echo "代理:   $proxy_status"
+  echo "沙箱:   $sandbox_status"
+  echo "生效配置: $active"
+}
 do_switch() {
   local profiles
   profiles=$(run_helper list)
