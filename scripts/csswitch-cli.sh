@@ -425,8 +425,43 @@ do_delete() {
   run_helper delete "${ids[$((idx-1))]}"
   msg "已删除。"
 }
-do_login_url() { msg "login url (TODO)"; }
-do_doctor() { msg "doctor (TODO)"; }
+do_login_url() {
+  local bin
+  bin=$(find_science_bin) || { err "找不到 claude-science 二进制"; return; }
+  if ! sandbox_running; then
+    err "沙箱未运行，请先启动。"
+    return
+  fi
+  local url
+  url=$(HOME="$SANDBOX_HOME" "$bin" url --data-dir "$DATA_DIR" 2>/dev/null | grep -Eo 'https?://[^ ]+' | head -1)
+  if [[ -z "$url" ]]; then
+    # Fallback to port if url command returns nothing usable.
+    local port
+    port=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin)['sandbox_port'])")
+    url="http://127.0.0.1:$port"
+  fi
+  msg "登录链接: $url"
+  if command -v xdg-open &>/dev/null; then
+    xdg-open "$url" || err "xdg-open 失败，请手动打开链接。"
+  fi
+}
+
+do_doctor() {
+  local cfg adapter has_key
+  cfg=$(run_helper load)
+  adapter=$(run_helper active 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('template_id',''))" || echo "")
+  has_key=$(run_helper active 2>/dev/null | python3 -c "import sys,json; print('1' if json.load(sys.stdin).get('api_key') else '0')" || echo "0")
+  local proxy_port sandbox_port
+  proxy_port=$(echo "$cfg" | python3 -c "import sys,json; print(json.load(sys.stdin)['proxy_port'])")
+  sandbox_port=$(echo "$cfg" | python3 -c "import sys,json; print(json.load(sys.stdin)['sandbox_port'])")
+  CSSWITCH_PROVIDER="${adapter:-}" \
+  CSSWITCH_ADAPTER="${adapter:-}" \
+  CSSWITCH_KEY_PRESENT="$has_key" \
+  CSSWITCH_PROXY_PORT="$proxy_port" \
+  CSSWITCH_SANDBOX_PORT="$sandbox_port" \
+  CSSWITCH_CONFIG="$CSSWITCH_DIR/config.json" \
+    "$DOCTOR"
+}
 
 do_init() {
   msg "初始化 CSSwitch 目录: $CSSWITCH_DIR"
