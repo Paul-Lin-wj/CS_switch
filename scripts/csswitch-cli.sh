@@ -395,13 +395,15 @@ with open('$env_file', 'w') as f:
   fi
   # model 通过环境变量 CSSWITCH_RELAY_MODEL / CSSWITCH_OPENAI_MODEL 传递（已设在 env_vars 中）
 
-  PROXY_SCRIPT="$script" \
-  PROXY_PORT="$proxy_port" \
-  PROXY_SECRET="$secret" \
-  PROXY_ADAPTER="${adapter:-relay}" \
-  PROXY_ARGS="$proxy_args" \
-  PROXY_LOG="$CSSWITCH_DIR/logs/proxy-cli.log" \
-    nohup env "${env_vars[@]}" bash "$WATCHDOG" \
+  # 把 watchdog 所需变量加入 env_vars（env 会丢弃前缀变量，必须显式传入）
+  env_vars+=("PROXY_SCRIPT=$script")
+  env_vars+=("PROXY_PORT=$proxy_port")
+  env_vars+=("PROXY_SECRET=$secret")
+  env_vars+=("PROXY_ADAPTER=${adapter:-relay}")
+  env_vars+=("PROXY_ARGS=$proxy_args")
+  env_vars+=("PROXY_LOG=$CSSWITCH_DIR/logs/proxy-cli.log")
+
+  nohup env "${env_vars[@]}" bash "$WATCHDOG" \
     >> "$CSSWITCH_DIR/logs/proxy-watchdog.log" 2>&1 &
   local proxy_pid=$!
 
