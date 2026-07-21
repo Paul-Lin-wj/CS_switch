@@ -3,9 +3,7 @@
 import argparse
 import json
 import os
-import stat
 import sys
-import uuid
 from pathlib import Path
 from tempfile import mkstemp
 
@@ -56,16 +54,17 @@ def ensure_dir(path: Path):
     os.chmod(path, 0o700)
 
 
-def assert_not_symlink(path: Path):
-    if path.is_symlink():
-        raise ValueError(f"Refusing to follow symlink: {path}")
+def assert_no_symlink_in_path(path: Path):
+    for p in list(path.parents) + [path]:
+        if p.is_symlink():
+            raise ValueError(f"Refusing to follow symlink: {p}")
 
 
 def load_config():
     p = config_path()
     if not p.exists():
         return default_config()
-    assert_not_symlink(p)
+    assert_no_symlink_in_path(p)
     with open(p, "r", encoding="utf-8") as f:
         data = json.load(f)
     cfg = default_config()
@@ -89,8 +88,8 @@ def default_config():
 
 def save_config(cfg):
     p = config_path()
+    assert_no_symlink_in_path(p)
     ensure_dir(p.parent)
-    assert_not_symlink(p)
     fd, tmp = mkstemp(dir=p.parent, prefix="config.json.tmp")
     try:
         os.fchmod(fd, 0o600)
