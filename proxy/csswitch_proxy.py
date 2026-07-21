@@ -1214,43 +1214,16 @@ if __name__ == "__main__":
     LOG = args.log
     KEY = load_key(PROV, args)
     AUTH_SECRET = os.environ.get("CSSWITCH_AUTH_TOKEN") or args.auth_token
-    # relay：按中转站 base_url 装配上游端点（base + /v1/messages、base + /v1/models）。
-    if PROV_NAME == "relay":
-        base = (os.environ.get("CSSWITCH_RELAY_BASE_URL") or args.relay_base or "").strip().rstrip("/")
-        if not base or not re.match(r"^https?://", base):
-            print("relay 需要中转站 base_url（http(s)://…）。用 --relay-base 或环境变量 "
-                  "CSSWITCH_RELAY_BASE_URL 提供。", file=sys.stderr)
-            sys.exit(1)
-        PROV = dict(PROV)
-        PROV["url"] = base + "/v1/messages"
-        PROV["models_url"] = base + "/v1/models"
-        forced = (os.environ.get("CSSWITCH_RELAY_MODEL") or "").strip()
-        if forced:
-            RELAY_FORCE_MODEL = forced
-        RELAY_THINKING = (os.environ.get("CSSWITCH_RELAY_THINKING") or "").strip() or None
-    elif PROV_NAME in ("openai-custom", "openai-responses"):
-        base = normalize_openai_base(os.environ.get("CSSWITCH_OPENAI_BASE_URL") or args.openai_base or "")
-        if not base or not re.match(r"^https?://", base):
-            print(f"{PROV_NAME} 需要 OpenAI base root（http(s)://…）。用 --openai-base 或环境变量 "
-                  "CSSWITCH_OPENAI_BASE_URL 提供。", file=sys.stderr)
-            sys.exit(1)
-        forced = (os.environ.get("CSSWITCH_OPENAI_MODEL") or "").strip()
-        PROV = dict(PROV)
-        suffix = "/responses" if PROV.get("api_format") == "openai_responses" else "/chat/completions"
-        PROV["url"] = openai_endpoint(base, suffix)
-        PROV["models_url"] = openai_endpoint(base, "/models")
-        # 模型发现 scratch 只需要 /models，不能要求 CSSWITCH_OPENAI_MODEL；
-        # 正式推理由 Rust 侧 relay_missing_model + Message 探针保证 model 必填。
-        if forced:
-            PROV["default_model"] = forced
-            RELAY_FORCE_MODEL = forced
-    _up = os.environ.get("CSSWITCH_UPSTREAM_URL")
-    if _up:
-        PROV = dict(PROV)
-        PROV["url"] = _up
-    if not KEY:
-        print(f"找不到 {PROV['key_env']}。用环境变量或 --env-file <路径> 提供。", file=sys.stderr)
-        sys.exit(1)
+    # multi-config 必须在 provider 验证之前处理：multi 模式下各 provider 的
+    # base_url/key 从 JSON 文件读取，不需要 --relay-base 等 CLI 参数。
+    MULTI_MODE = False
+    MULTI_REGISTRY = {}
+    DEFAULT_PREFIX = ""
+    # multi-config 必须在 provider 验证之前处理：multi 模式下各 provider 的
+    # base_url/key 从 JSON 文件读取，不需要 --relay-base 等 CLI 参数。
+    MULTI_MODE = False
+    MULTI_REGISTRY = {}
+    DEFAULT_PREFIX = ""
     if args.multi_config:
         MULTI_MODE = True
         with open(args.multi_config) as f:
@@ -1288,10 +1261,49 @@ if __name__ == "__main__":
             }
         PROV_NAME = "multi"
         PROV = {"mode": "anthropic"}
+        log(f"multi-config 已加载: {len(MULTI_REGISTRY)} 个 provider")
+    # relay：按中转站 base_url 装配上游端点（base + /v1/messages、base + /v1/models）。
+    if PROV_NAME == "relay" and not MULTI_MODE:
+        base = (os.environ.get("CSSWITCH_RELAY_BASE_URL") or args.relay_base or "").strip().rstrip("/")
+        if not base or not re.match(r"^https?://", base):
+            print("relay 需要中转站 base_url（http(s)://…）。用 --relay-base 或环境变量 "
+                  "CSSWITCH_RELAY_BASE_URL 提供。", file=sys.stderr)
+            sys.exit(1)
+        PROV = dict(PROV)
+        PROV["url"] = base + "/v1/messages"
+        PROV["models_url"] = base + "/v1/models"
+        forced = (os.environ.get("CSSWITCH_RELAY_MODEL") or "").strip()
+        if forced:
+            RELAY_FORCE_MODEL = forced
+        RELAY_THINKING = (os.environ.get("CSSWITCH_RELAY_THINKING") or "").strip() or None
+    elif PROV_NAME in ("openai-custom", "openai-responses"):
+        base = normalize_openai_base(os.environ.get("CSSWITCH_OPENAI_BASE_URL") or args.openai_base or "")
+        if not base or not re.match(r"^https?://", base):
+            print(f"{PROV_NAME} 需要 OpenAI base root（http(s)://…）。用 --openai-base 或环境变量 "
+                  "CSSWITCH_OPENAI_BASE_URL 提供。", file=sys.stderr)
+            sys.exit(1)
+        forced = (os.environ.get("CSSWITCH_OPENAI_MODEL") or "").strip()
+        PROV = dict(PROV)
+        suffix = "/responses" if PROV.get("api_format") == "openai_responses" else "/chat/completions"
+        PROV["url"] = openai_endpoint(base, suffix)
+        PROV["models_url"] = openai_endpoint(base, "/models")
+        # 模型发现 scratch 只需要 /models，不能要求 CSSWITCH_OPENAI_MODEL；
+        # 正式推理由 Rust 侧 relay_missing_model + Message 探针保证 model 必填。
+        if forced:
+            PROV["default_model"] = forced
+            RELAY_FORCE_MODEL = forced
+    _up = os.environ.get("CSSWITCH_UPSTREAM_URL")
+    if _up:
+        PROV = dict(PROV)
+        PROV["url"] = _up
+    if not MULTI_MODE and not KEY:
+        print(f"找不到 {PROV['key_env']}。用环境变量或 --env-file <路径> 提供。", file=sys.stderr)
+        sys.exit(1)
+    SHIM_MODE = dsml_shim.shim_mode(PROV_NAME, PROV)
+    if MULTI_MODE:
         log(f"CSSwitch 代理启动 127.0.0.1:{args.port}  mode=multi  "
             f"providers={list(MULTI_REGISTRY.keys())}  default={DEFAULT_PREFIX}")
     else:
-        SHIM_MODE = dsml_shim.shim_mode(PROV_NAME, PROV)
         log(f"CSSwitch 代理启动 127.0.0.1:{args.port}  provider={PROV_NAME}  "
             f"key=已加载(未显示)  上游={PROV['url']}  dsml_shim={SHIM_MODE}")
     # 绑定重试：上次会话遗留的孤儿代理可能还占着端口（app 侧会主动清，但退干净需一点时间）。

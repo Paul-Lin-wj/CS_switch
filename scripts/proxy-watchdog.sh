@@ -32,7 +32,7 @@ port_retry=0
 delay="$BASE_DELAY"
 
 while (( retry < MAX_RETRIES )); do
-  echo "[$(date '+%H:%M:%S')] 代理启动 (attempt=$((retry+1)), adapter=$PROXY_ADAPTER, port=$PROXY_PORT)" >> "$PROXY_LOG"
+  echo "[$(date '+%H:%M:%S')] 代理启动 (attempt=$((retry+1)), adapter=$PROXY_ADAPTER, port=$PROXY_PORT, args=[$PROXY_ARGS])" >> "$PROXY_LOG"
 
   start_time=$(date +%s)
 
