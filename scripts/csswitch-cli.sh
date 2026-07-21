@@ -245,7 +245,6 @@ do_start() {
   local launch_args=(
     --port "$sandbox_port"
     --proxy-url "http://127.0.0.1:$proxy_port/$secret"
-    --skip-oauth-forge
   )
   [[ -n "$no_sandbox_flag" ]] && launch_args+=("$no_sandbox_flag")
 
