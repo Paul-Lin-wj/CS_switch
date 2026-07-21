@@ -9,6 +9,7 @@
 #   PROXY_SECRET   - path-secret
 #   PROXY_ADAPTER  - adapter 名（relay/deepseek/qwen/...）
 #   PROXY_LOG      - 日志文件路径
+#   PROXY_ARGS     - 额外代理参数（如 --relay-base URL --model NAME），空格分隔
 #   以及 key 环境变量（CSSWITCH_RELAY_KEY 等）
 set -euo pipefail
 
@@ -17,6 +18,7 @@ PROXY_PORT="${PROXY_PORT:?}"
 PROXY_SECRET="${PROXY_SECRET:?}"
 PROXY_ADAPTER="${PROXY_ADAPTER:?}"
 PROXY_LOG="${PROXY_LOG:-/dev/null}"
+PROXY_ARGS="${PROXY_ARGS:-}"
 
 MAX_RETRIES=50          # 最大连续重启次数（防止无限循环）
 MAX_PORT_RETRIES=10     # 端口占用最大重试次数
@@ -35,10 +37,12 @@ while (( retry < MAX_RETRIES )); do
   start_time=$(date +%s)
 
   # 启动代理（前台运行，捕获退出码）
+  # shellcheck disable=SC2086
   python3 "$PROXY_SCRIPT" \
     --provider "$PROXY_ADAPTER" \
     --port "$PROXY_PORT" \
     --auth-token "$PROXY_SECRET" \
+    $PROXY_ARGS \
     >> "$PROXY_LOG" 2>&1 &
   proxy_pid=$!
 

@@ -383,11 +383,20 @@ with open('$env_file', 'w') as f:
   fi
 
   # 用 watchdog 包装代理
+  # 构建代理额外参数（base_url/model 以 CLI 参数传递，比环境变量继承更可靠）
+  local proxy_args=""
+  if [[ "$adapter" == "relay" ]]; then
+    [[ -n "$base_url" ]] && proxy_args+=" --relay-base $base_url"
+  elif [[ "$adapter" == "openai-custom" || "$adapter" == "openai-responses" ]]; then
+    [[ -n "$base_url" ]] && proxy_args+=" --openai-base $base_url"
+  fi
+  # model 通过环境变量 CSSWITCH_RELAY_MODEL / CSSWITCH_OPENAI_MODEL 传递（已设在 env_vars 中）
+
   PROXY_SCRIPT="$script" \
   PROXY_PORT="$proxy_port" \
   PROXY_SECRET="$secret" \
   PROXY_ADAPTER="${adapter:-multi}" \
-  PROXY_MULTI_CONFIG="${multi_config_file}" \
+  PROXY_ARGS="$proxy_args" \
   PROXY_LOG="$CSSWITCH_DIR/logs/proxy-cli.log" \
     nohup env "${env_vars[@]}" bash "$WATCHDOG" \
     >> "$CSSWITCH_DIR/logs/proxy-watchdog.log" 2>&1 &
