@@ -481,12 +481,71 @@ do_init() {
   fi
 }
 
+tui_menu() {
+  local height=20 width=60
+  local choice_file
+  choice_file=$(mktemp)
+  trap 'rm -f "$choice_file"' EXIT
+  while true; do
+    if [[ "$UI_TOOL" == "dialog" ]]; then
+      dialog --clear --title "CSSwitch-Linux CLI" --menu "选择操作" "$height" "$width" 10 \
+        1 "启动 CSSwitch" \
+        2 "停止 CSSwitch" \
+        3 "查看运行状态" \
+        4 "切换 API 服务商" \
+        5 "添加新的 API 提供商" \
+        6 "编辑 provider 配置" \
+        7 "删除 provider" \
+        8 "输出登录链接" \
+        9 "初始化 CSSwitch 目录" \
+        10 "运行诊断" \
+        0 "退出" \
+        2>"$choice_file" || true
+    else
+      whiptail --title "CSSwitch-Linux CLI" --menu "选择操作" "$height" "$width" 10 \
+        1 "启动 CSSwitch" \
+        2 "停止 CSSwitch" \
+        3 "查看运行状态" \
+        4 "切换 API 服务商" \
+        5 "添加新的 API 提供商" \
+        6 "编辑 provider 配置" \
+        7 "删除 provider" \
+        8 "输出登录链接" \
+        9 "初始化 CSSwitch 目录" \
+        10 "运行诊断" \
+        0 "退出" \
+        2>"$choice_file" || true
+    fi
+    local choice
+    choice=$(cat "$choice_file" 2>/dev/null || echo "")
+    [[ -z "$choice" ]] && continue
+    case "$choice" in
+      0) clear; echo "再见。"; exit 0 ;;
+      1) clear; do_start ;;
+      2) clear; do_stop ;;
+      3) clear; do_status ;;
+      4) clear; do_switch ;;
+      5) clear; do_add ;;
+      6) clear; do_edit ;;
+      7) clear; do_delete ;;
+      8) clear; do_login_url ;;
+      9) clear; do_init ;;
+      10) clear; do_doctor ;;
+    esac
+    [[ "$choice" != "0" ]] && { echo "按 Enter 继续..."; read -r; }
+  done
+}
+
 main() {
   ensure_helper
   if [[ ! -d "$CSSWITCH_DIR" ]]; then
-    echo "CSSwitch 目录不存在，请先运行 '初始化 CSSwitch 目录'（选项 9）。" >&2
+    echo "CSSwitch 目录不存在，请先运行初始化（选项 9）。" >&2
   fi
-  text_menu
+  if [[ -n "$UI_TOOL" ]]; then
+    tui_menu
+  else
+    text_menu
+  fi
 }
 
 main "$@"
