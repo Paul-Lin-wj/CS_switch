@@ -74,5 +74,8 @@ scratchpad/
 # Local Claude Code session config.
 .claude/
 
+# Isolated git worktrees.
+.worktrees/
+
 # Local seed files.
 .seed
