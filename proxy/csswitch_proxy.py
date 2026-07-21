@@ -1151,4 +1151,18 @@ if __name__ == "__main__":
                       file=sys.stderr, flush=True)
                 sys.exit(2)
             time.sleep(0.3)
-    srv.serve_forever()
+
+    # 信号处理：SIGTERM/SIGINT 优雅退出，SIGHUP 忽略（终端关闭不影响代理）。
+    import signal
+    def _shutdown(signum, frame):
+        log(f"收到信号 {signum}，正在关闭...")
+        srv.shutdown()
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+    try:
+        srv.serve_forever()
+    except Exception as e:
+        log(f"!! serve_forever 异常退出: {type(e).__name__}: {e}")
+        sys.exit(1)
