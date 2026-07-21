@@ -3,7 +3,12 @@
 # Supports dialog/whiptail; falls back to a plain text menu.
 set -euo pipefail
 
-PROJ="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+# Resource root: explicit CSSWITCH_REPO wins, then derive from script location.
+if [[ -n "${CSSWITCH_REPO:-}" ]]; then
+  PROJ="$CSSWITCH_REPO"
+else
+  PROJ="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+fi
 HELPER="$PROJ/scripts/csswitch_config_helper.py"
 LAUNCH="$PROJ/scripts/launch-virtual-sandbox.sh"
 STOP="$PROJ/scripts/stop-science-sandbox.sh"
@@ -229,10 +234,21 @@ do_start() {
   fi
 
   msg "启动沙箱 (port=$sandbox_port)..."
-  if ! SANDBOX_HOME="$SANDBOX_HOME" "$LAUNCH" \
-    --port "$sandbox_port" \
-    --proxy-url "http://127.0.0.1:$proxy_port/$secret" \
-    --skip-oauth-forge; then
+  local no_sandbox_flag=""
+  echo -n "是否使用 --no-sandbox 解除沙箱网络限制（允许镜像站下载）? [y/N] "
+  read -r no_sandbox_ans
+  if [[ "$no_sandbox_ans" == "y" || "$no_sandbox_ans" == "Y" ]]; then
+    no_sandbox_flag="--no-sandbox"
+  fi
+
+  local launch_args=(
+    --port "$sandbox_port"
+    --proxy-url "http://127.0.0.1:$proxy_port/$secret"
+    --skip-oauth-forge
+  )
+  [[ -n "$no_sandbox_flag" ]] && launch_args+=("$no_sandbox_flag")
+
+  if ! SANDBOX_HOME="$SANDBOX_HOME" "$LAUNCH" "${launch_args[@]}"; then
     err "沙箱启动失败，已停止代理。请检查日志后重试。"
     kill "$proxy_pid" 2>/dev/null || true
     return
@@ -252,7 +268,38 @@ do_start() {
     return
   fi
 
+  local content_port=$((sandbox_port + 1))
+  local bin
+  bin=$(find_science_bin) || { err "找不到 claude-science 二进制"; return; }
+
+  echo ""
+  echo "=== 启动完成 ==="
+  echo "本地访问："
+  echo "  主界面 : http://127.0.0.1:$sandbox_port"
+  echo "  内容页 : http://127.0.0.1:$content_port"
+  echo ""
+  echo "通过 SSH 从本地电脑远程访问（在你的电脑上执行）："
+  local remote_ip
+  remote_ip="$(hostname -I | awk '{print $1}')"
+  echo "  ssh -L ${sandbox_port}:localhost:${sandbox_port} -L ${content_port}:localhost:${content_port} $(whoami)@${remote_ip}"
+  echo ""
+  echo "然后在本机浏览器打开："
+  echo "  http://localhost:${sandbox_port}"
+  echo ""
+  echo "一次性登录链接："
+  HOME="$SANDBOX_HOME" "$bin" url --data-dir "$DATA_DIR" 2>/dev/null || true
+
   do_login_url
+}
+
+print_access_info() {
+  local sandbox_port content_port
+  sandbox_port=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin)['sandbox_port'])")
+  content_port=$((sandbox_port + 1))
+  echo ""
+  echo "=== 访问信息 ==="
+  echo "  主界面 : http://127.0.0.1:$sandbox_port"
+  echo "  内容页 : http://127.0.0.1:$content_port"
 }
 
 do_stop() {
