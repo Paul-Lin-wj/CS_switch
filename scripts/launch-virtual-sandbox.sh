@@ -121,8 +121,8 @@ _NO_PROXY="127.0.0.1,localhost,::1"
 echo "  外联防卡 = Anthropic HTTPS fast-fail（经 $_FASTFAIL_PROXY，no_proxy=$_NO_PROXY）"
 echo
 
-SERVE_FLAGS="--no-browser --no-auto-update --detached"
-[[ "$NO_SANDBOX" == "1" ]] && SERVE_FLAGS="$SERVE_FLAGS --no-sandbox"
+SERVE_FLAGS=(--no-browser --no-auto-update --detached)
+[[ "$NO_SANDBOX" == "1" ]] && SERVE_FLAGS+=(--no-sandbox)
 
 HOME="$SANDBOX_HOME" \
 ANTHROPIC_BASE_URL="$PROXY_URL" \
@@ -131,7 +131,7 @@ no_proxy="$_NO_PROXY" NO_PROXY="$_NO_PROXY" \
 "$BIN" serve \
   --data-dir "$DATA_DIR" \
   --port "$PORT" \
-  $SERVE_FLAGS
+  "${SERVE_FLAGS[@]}"
 
 echo
 echo "已后台启动。验证:"

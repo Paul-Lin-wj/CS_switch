@@ -52,6 +52,16 @@ if [[ ! -x "$SCIENCE_BIN" ]]; then
   exit 1
 fi
 
+# 生成或复用 auth-token（写入文件，供停止脚本和健康检查使用）
+SECRET_FILE="$LOG_DIR/headless.secret"
+if [[ -f "$SECRET_FILE" ]]; then
+  SECRET="$(cat "$SECRET_FILE")"
+else
+  SECRET="$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")"
+  echo "$SECRET" > "$SECRET_FILE"
+  chmod 600 "$SECRET_FILE"
+fi
+
 # 组装代理启动参数
 PROXY_ARGS=(
   --provider "$PROVIDER"
@@ -66,7 +76,7 @@ fi
 
 echo "=== CSSwitch headless 启动 ==="
 echo "provider : $PROVIDER"
-echo "proxy    : 127.0.0.1:$PROXY_PORT"
+echo "proxy    : 127.0.0.1:$PROXY_PORT (auth-token enabled)"
 echo "sandbox  : 127.0.0.1:$SANDBOX_PORT (content port $CONTENT_PORT)"
 echo "停止脚本 : $CSSWITCH_REPO/scripts/csswitch-stop-headless.sh"
 echo ""
@@ -79,13 +89,13 @@ sleep 0.5
 # 启动代理（key 通过环境变量注入，不进入 ps 命令行）
 echo "[1/2] 启动代理 ..."
 export "$KEY_VAR"="${!KEY_VAR}"
-python3 "$CSSWITCH_REPO/proxy/csswitch_proxy.py" "${PROXY_ARGS[@]}" > "$LOG_DIR/proxy.log" 2>&1 &
+python3 "$CSSWITCH_REPO/proxy/csswitch_proxy.py" "${PROXY_ARGS[@]}" --auth-token "$SECRET" > "$LOG_DIR/proxy.log" 2>&1 &
 PROXY_PID=$!
 echo "$PROXY_PID" > "$LOG_DIR/proxy.pid"
 
 # 等待代理就绪
 for i in $(seq 1 30); do
-  if curl -sS "http://127.0.0.1:$PROXY_PORT/health" >/dev/null 2>&1; then
+  if curl -sS "http://127.0.0.1:$PROXY_PORT/$SECRET/health" >/dev/null 2>&1; then
     break
   fi
   if ! kill -0 "$PROXY_PID" 2>/dev/null; then
@@ -110,7 +120,7 @@ SCIENCE_BIN="$SCIENCE_BIN" \
 SANDBOX_HOME="$SANDBOX_HOME" \
 bash "$CSSWITCH_REPO/scripts/launch-virtual-sandbox.sh" \
   --port "$SANDBOX_PORT" \
-  --proxy-url "http://127.0.0.1:$PROXY_PORT" \
+  --proxy-url "http://127.0.0.1:$PROXY_PORT/$SECRET" \
   --no-sandbox
 
 # 获取访问信息

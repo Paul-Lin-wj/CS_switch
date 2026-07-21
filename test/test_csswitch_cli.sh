@@ -10,7 +10,7 @@ trap 'rm -rf "$T"' EXIT
 echo "== csswitch-cli integration tests =="
 
 # --- 1. Init creates dirs and config with correct perms ---
-CSSWITCH_DIR="$T/c1" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
+CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
 9
 0
 EOF
@@ -29,7 +29,7 @@ active=$(CSSWITCH_CONFIG="$T/c1/config.json" python3 "$HELPER" active | python3 
 [[ "$active" == "DS" ]] || { echo "FAIL: active profile mismatch: $active"; exit 1; }
 
 # --- 3. Status reports stopped, shows active profile, no key leak ---
-out=$(CSSWITCH_DIR="$T/c1" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
+out=$(CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
 3
 0
 EOF
@@ -42,7 +42,7 @@ echo "$out" | grep -q "sk-test123" && { echo "FAIL: full API key leaked in statu
 # --- 4. Status with no active profile shows "无" ---
 CSSWITCH_CONFIG="$T/c1/config.json" python3 "$HELPER" delete \
   "$(CSSWITCH_CONFIG="$T/c1/config.json" python3 "$HELPER" list | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")" >/dev/null
-out2=$(CSSWITCH_DIR="$T/c1" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
+out2=$(CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
 3
 0
 EOF
@@ -50,7 +50,7 @@ EOF
 echo "$out2" | grep -q "生效配置: 无" || { echo "FAIL: status did not show '无' for no active profile"; exit 1; }
 
 # --- 5. Start fails gracefully when no active provider ---
-out3=$(CSSWITCH_DIR="$T/c1" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF' 2>&1
+out3=$(CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF' 2>&1
 1
 0
 EOF
@@ -69,7 +69,7 @@ CSSWITCH_CONFIG="$T/c1/config.json" CSSWITCH_PROVIDER=relay CSSWITCH_ADAPTER=rel
   CSSWITCH_KEY_PRESENT=1 "$ROOT/scripts/doctor.sh" >/dev/null || { echo "FAIL: doctor failed"; exit 1; }
 
 # --- 8. Stop handles missing Science binary gracefully ---
-out4=$(CSSWITCH_DIR="$T/c1" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF' 2>&1
+out4=$(CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF' 2>&1
 2
 0
 EOF
@@ -89,5 +89,19 @@ fi
 [[ ! -f "$SYM/.csswitch/config.json" ]] || { echo "FAIL: config created under symlink path"; exit 1; }
 rm -rf "$SYM"
 trap 'rm -rf "$T"' EXIT
+
+
+# --- 10. Config helper set-secret round-trips correctly ---
+CSSWITCH_CONFIG="$T/c1/config.json" python3 "$HELPER" set-secret --secret "test-secret-abc" >/dev/null
+sec=$(CSSWITCH_CONFIG="$T/c1/config.json" python3 "$HELPER" load | python3 -c "import sys,json; print(json.load(sys.stdin)['secret'])")
+[[ "$sec" == "test-secret-abc" ]] || { echo "FAIL: secret round-trip failed: $sec"; exit 1; }
+
+# --- 11. Status does not leak secret ---
+out5=$(CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
+3
+0
+EOF
+)
+echo "$out5" | grep -q "test-secret-abc" && { echo "FAIL: secret leaked in status output"; exit 1; }
 
 echo "ALL PASS"

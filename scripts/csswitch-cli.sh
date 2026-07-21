@@ -121,9 +121,10 @@ find_science_bin() {
 }
 
 proxy_health() {
-  local port secret
-  port=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin)['proxy_port'])")
-  secret=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin).get('secret',''))")
+  local cfg port secret
+  cfg=$(run_helper load)
+  port=$(echo "$cfg" | python3 -c "import sys,json; print(json.load(sys.stdin)['proxy_port'])")
+  secret=$(echo "$cfg" | python3 -c "import sys,json; print(json.load(sys.stdin).get('secret',''))")
   if [[ -z "$secret" ]]; then
     return 1
   fi
@@ -174,12 +175,23 @@ do_start() {
     return
   fi
 
-  # Determine adapter and key env from template registry.
+  # Determine adapter and key env from template registry (single read, safe quoting).
   local adapter key_env base_editable requires_model
-  adapter=$(run_helper templates | python3 -c "import sys,json; t=[x for x in json.load(sys.stdin) if x['id']=='$template_id'][0]; print(t['adapter'])")
-  key_env=$(run_helper templates | python3 -c "import sys,json; t=[x for x in json.load(sys.stdin) if x['id']=='$template_id'][0]; print(t['key_env'])")
-  base_editable=$(run_helper templates | python3 -c "import sys,json; t=[x for x in json.load(sys.stdin) if x['id']=='$template_id'][0]; print('1' if t['base_url_editable'] else '')")
-  requires_model=$(run_helper templates | python3 -c "import sys,json; t=[x for x in json.load(sys.stdin) if x['id']=='$template_id'][0]; print('1' if t['requires_model'] else '')")
+  local tpl_json
+  tpl_json=$(run_helper templates | python3 -c "
+import sys, json, json as j
+tid = j.dumps(sys.argv[1])
+tpls = json.load(sys.stdin)
+t = next(x for x in tpls if x['id'] == j.loads(tid))
+print(t['adapter'])
+print(t['key_env'])
+print('1' if t['base_url_editable'] else '')
+print('1' if t['requires_model'] else '')
+" "$template_id")
+  adapter=$(echo "$tpl_json" | sed -n '1p')
+  key_env=$(echo "$tpl_json" | sed -n '2p')
+  base_editable=$(echo "$tpl_json" | sed -n '3p')
+  requires_model=$(echo "$tpl_json" | sed -n '4p')
 
   if [[ "$base_editable" == "1" && -z "$base_url" ]]; then
     err "该 provider 需要 base_url，请先编辑配置。"
