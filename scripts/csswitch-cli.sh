@@ -59,19 +59,23 @@ text_menu() {
     echo "10) 运行诊断"
     echo "0) 退出"
     echo -n "请选择: "
-    read -r choice
+    if ! read -r choice; then
+      echo
+      echo "再见。"
+      exit 0
+    fi
     case "$choice" in
-      1) do_start ;;&
-      2) do_stop ;;&
-      3) do_status ;;&
-      4) do_switch ;;&
-      5) do_add ;;&
-      6) do_edit ;;&
-      7) do_delete ;;&
-      8) do_login_url ;;&
-      9) do_init ;;&
-      10) do_doctor ;;&
-      0) echo "再见。"; exit 0 ;;&
+      1) do_start ;;
+      2) do_stop ;;
+      3) do_status ;;
+      4) do_switch ;;
+      5) do_add ;;
+      6) do_edit ;;
+      7) do_delete ;;
+      8) do_login_url ;;
+      9) do_init ;;
+      10) do_doctor ;;
+      0) echo "再见。"; exit 0 ;;
       *) echo "无效选项，请重新选择。" ;;
     esac
   done
