@@ -10,7 +10,6 @@
 #   PROXY_ADAPTER  - adapter 名（relay/deepseek/qwen/...）
 #   PROXY_LOG      - 日志文件路径
 #   PROXY_ARGS     - 额外代理参数（如 --relay-base URL --model NAME），空格分隔
-#   以及 key 环境变量（CSSWITCH_RELAY_KEY 等）
 set -euo pipefail
 
 PROXY_SCRIPT="${PROXY_SCRIPT:?}"
@@ -31,35 +30,48 @@ if [[ -f "$LOCK_FILE" ]]; then
         echo "[$(date '+%H:%M:%S')] 另一个 watchdog (PID=$old_pid) 已在运行，退出。" >> "$PROXY_LOG"
         exit 0
     fi
-    # Stale lock, remove it
     rm -f "$LOCK_FILE" 2>/dev/null || true
 fi
 echo $$ > "$LOCK_FILE"
 
-# Signal handler: when watchdog is killed (SIGTERM/SIGINT), also kill the proxy.
-# Without this, pkill on watchdog leaves the proxy orphaned, and the new watchdog
-# immediately starts another proxy on the same port → "Address already in use".
+# 启动时记录进程信息（用于事后分析谁杀了 watchdog）
+echo "[$(date '+%H:%M:%S')] watchdog 启动 (pid=$$, ppid=$PPID, port=$PROXY_PORT, adapter=$PROXY_ADAPTER)" >> "$PROXY_LOG"
+echo "[$(date '+%H:%M:%S')] watchdog 进程树: $(ps -o pid,ppid,stat,cmd -p $$ 2>/dev/null | tail -1)" >> "$PROXY_LOG"
+
+# Signal handler
 _current_proxy_pid=""
 _shutdown() {
-    echo "[$(date '+%H:%M:%S')] watchdog 收到信号，正在关闭..." >> "$PROXY_LOG"
+    local sig="${1:-unknown}"
+    # 尝试获取信号发送者（Linux 特有）
+    local sender=""
+    if [[ -f /proc/$$/status ]]; then
+        sender=$(grep -i "SigQ\|SigPnd\|SigBlk" /proc/$$/status 2>/dev/null | tr '\n' ' ' || true)
+    fi
+    # 检查谁可能发了信号：查看同进程组的其他进程
+    local pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+    local group_procs=$(ps -o pid,ppid,cmd -g "${pgid:-$$}" 2>/dev/null | head -10 || true)
+    echo "[$(date '+%H:%M:%S')] !! watchdog 收到信号 $sig (pid=$$, ppid=$PPID)" >> "$PROXY_LOG"
+    echo "[$(date '+%H:%M:%S')] !! 信号详情: $sender" >> "$PROXY_LOG"
+    echo "[$(date '+%H:%M:%S')] !! 同进程组: $group_procs" >> "$PROXY_LOG"
     if [[ -n "$_current_proxy_pid" ]] && kill -0 "$_current_proxy_pid" 2>/dev/null; then
-        # 用 SIGKILL 直接杀死代理，不触发代理的 SIGTERM handler（避免重复关闭日志）
+        echo "[$(date '+%H:%M:%S')] !! 杀死代理 (pid=$_current_proxy_pid)" >> "$PROXY_LOG"
         kill -9 "$_current_proxy_pid" 2>/dev/null || true
         wait "$_current_proxy_pid" 2>/dev/null || true
     fi
     _cleanup_lock
     exit 0
 }
-# 只捕获 SIGTERM（do_stop）和 SIGINT（Ctrl+C），不捕获 SIGHUP。
-# SIGHUP 是终端关闭信号，不应杀死代理——代理应在后台继续运行。
-trap _shutdown SIGTERM SIGINT
+trap '_shutdown SIGTERM' SIGTERM
+trap '_shutdown SIGINT' SIGINT
+trap '_shutdown SIGHUP' SIGHUP
 
-MAX_RETRIES=50          # 最大连续重启次数（防止无限循环）
-MAX_PORT_RETRIES=10     # 端口占用最大重试次数
-BASE_DELAY=2            # 首次重启等待秒数
-MAX_DELAY=60            # 最大退避秒数
-STABLE_THRESHOLD=30     # 运行超过此秒数视为稳定，重置退避
-QUICK_EXIT=5            # 低于此秒数视为快速退出（可能是端口占用）
+MAX_RETRIES=50
+MAX_PORT_RETRIES=10
+BASE_DELAY=2
+MAX_DELAY=60
+STABLE_THRESHOLD=30
+QUICK_EXIT=5
+HEARTBEAT_INTERVAL=60  # 每 60 秒记录一次代理存活状态
 
 retry=0
 port_retry=0
@@ -70,7 +82,7 @@ while (( retry < MAX_RETRIES )); do
 
   start_time=$(date +%s)
 
-  # 启动代理（前台运行，捕获退出码）
+  # 启动代理
   # shellcheck disable=SC2086
   python3 "$PROXY_SCRIPT" \
     --provider "$PROXY_ADAPTER" \
@@ -80,25 +92,58 @@ while (( retry < MAX_RETRIES )); do
     >> "$PROXY_LOG" 2>&1 &
   proxy_pid=$!
   _current_proxy_pid="$proxy_pid"
+  echo "[$(date '+%H:%M:%S')] 代理进程启动 (pid=$proxy_pid)" >> "$PROXY_LOG"
 
-  # 等待代理进程退出
+  # 心跳监控 + 等待退出
+  last_heartbeat=$start_time
+  while kill -0 "$proxy_pid" 2>/dev/null; do
+    sleep 1
+    now=$(date +%s)
+    if (( now - last_heartbeat >= HEARTBEAT_INTERVAL )); then
+      echo "[$(date '+%H:%M:%S')] 代理心跳 (pid=$proxy_pid, runtime=$((now - start_time))s)" >> "$PROXY_LOG"
+      last_heartbeat=$now
+    fi
+  done
+
   wait "$proxy_pid" 2>/dev/null || true
   exit_code=$?
 
   end_time=$(date +%s)
   runtime=$((end_time - start_time))
 
-  echo "[$(date '+%H:%M:%S')] 代理退出 (pid=$proxy_pid, exit=$exit_code, runtime=${runtime}s)" >> "$PROXY_LOG"
+  # 详细的退出分析
+  signal_name=""
+  if (( exit_code >= 128 )); then
+    sig_num=$((exit_code - 128))
+    case $sig_num in
+      1) signal_name="SIGHUP" ;;
+      2) signal_name="SIGINT" ;;
+      3) signal_name="SIGQUIT" ;;
+      6) signal_name="SIGABRT" ;;
+      9) signal_name="SIGKILL" ;;
+      11) signal_name="SIGSEGV" ;;
+      13) signal_name="SIGPIPE" ;;
+      14) signal_name="SIGALRM" ;;
+      15) signal_name="SIGTERM" ;;
+      *) signal_name="SIG$sig_num" ;;
+    esac
+  fi
 
-  # 检查是否被外部 pkill 杀死（SIGTERM=143, SIGKILL=137）
-  # 这些情况下不重启（说明是用户主动停止）
+  echo "[$(date '+%H:%M:%S')] 代理退出 (pid=$proxy_pid, exit=$exit_code, signal=$signal_name, runtime=${runtime}s)" >> "$PROXY_LOG"
+
+  # 检查代理进程的退出原因（如果可能）
+  if [[ -f /proc/$proxy_pid/status ]]; then
+    echo "[$(date '+%H:%M:%S')] 代理退出时状态: $(grep -E 'State|SigPnd|SigBlk' /proc/$proxy_pid/status 2>/dev/null | tr '\n' ' ')" >> "$PROXY_LOG"
+  fi
+
+  # SIGTERM/SIGKILL = 外部主动停止
   if (( exit_code == 143 || exit_code == 137 )); then
     _cleanup_lock
-    echo "[$(date '+%H:%M:%S')] 代理被外部信号终止 (exit=$exit_code)，停止保活。" >> "$PROXY_LOG"
+    echo "[$(date '+%H:%M:%S')] 代理被外部信号终止 (exit=$exit_code, signal=$signal_name)，停止保活。" >> "$PROXY_LOG"
     exit 0
   fi
 
-  # 快速退出（<5s）+ exit code 2 = 端口绑定失败
+  # 快速退出 = 端口绑定失败
   if (( runtime < QUICK_EXIT && (exit_code == 2 || exit_code == 0) )); then
     port_retry=$((port_retry + 1))
     if (( port_retry >= MAX_PORT_RETRIES )); then
@@ -107,7 +152,6 @@ while (( retry < MAX_RETRIES )); do
       exit 1
     fi
     echo "[$(date '+%H:%M:%S')] 疑似端口占用 (exit=$exit_code, runtime=${runtime}s)，尝试清理..." >> "$PROXY_LOG"
-    # 尝试杀死占用端口的进程
     pids=$(ss -tlnp "sport = :${PROXY_PORT}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
     if [[ -n "$pids" ]]; then
       echo "[$(date '+%H:%M:%S')] 杀死端口占用进程: $pids" >> "$PROXY_LOG"
@@ -126,11 +170,8 @@ while (( retry < MAX_RETRIES )); do
   fi
 
   retry=$((retry + 1))
-
   echo "[$(date '+%H:%M:%S')] ${delay}s 后重启..." >> "$PROXY_LOG"
   sleep "$delay"
-
-  # 指数退避
   delay=$((delay * 2))
   (( delay > MAX_DELAY )) && delay="$MAX_DELAY"
 done
