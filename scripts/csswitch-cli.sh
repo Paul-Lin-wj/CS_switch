@@ -540,10 +540,40 @@ do_stop() {
   local script="$PROJ/proxy/csswitch_proxy.py"
   local script_rex
   script_rex=$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "$script")
-  # 先停 watchdog（它会收到 SIGTERM 后停止重启循环），再停代理
-  pkill -f "proxy-watchdog.*${port}" 2>/dev/null || true
-  pkill -f "${script_rex}.*--port ${port}" 2>/dev/null || true
-  # 兜底：按端口杀死占用进程
+
+  # 1) 停 watchdog：发 SIGTERM 并等待它退出（watchdog 会连带杀 proxy）
+  local wd_pids
+  wd_pids=$(pgrep -f "proxy-watchdog.*${port}" 2>/dev/null || true)
+  if [[ -n "$wd_pids" ]]; then
+    echo "$wd_pids" | xargs kill 2>/dev/null || true
+    for _ in $(seq 1 30); do
+      if ! echo "$wd_pids" | xargs kill -0 2>/dev/null; then break; fi
+      sleep 0.2
+    done
+  fi
+
+  # 2) 停 proxy（如果 watchdog 没杀干净）
+  local px_pids
+  px_pids=$(pgrep -f "${script_rex}.*--port ${port}" 2>/dev/null || true)
+  if [[ -n "$px_pids" ]]; then
+    echo "$px_pids" | xargs kill 2>/dev/null || true
+    for _ in $(seq 1 30); do
+      if ! echo "$px_pids" | xargs kill -0 2>/dev/null; then break; fi
+      sleep 0.2
+    done
+    # 还没死就 SIGKILL
+    echo "$px_pids" | xargs kill -0 2>/dev/null && echo "$px_pids" | xargs kill -9 2>/dev/null || true
+  fi
+
+  # 3) 兜底：等待端口释放（最多 5 秒）
+  for _ in $(seq 1 50); do
+    if ! ss -tlnp "sport = :${port}" 2>/dev/null | grep -q "LISTEN"; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  # 4) 最终兜底：按端口 SIGKILL
   local pids
   pids=$(ss -tlnp "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
   if [[ -n "$pids" ]]; then

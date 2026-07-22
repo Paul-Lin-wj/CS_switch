@@ -28,7 +28,13 @@ _shutdown() {
     echo "[$(date '+%H:%M:%S')] watchdog 收到信号，正在关闭..." >> "$PROXY_LOG"
     if [[ -n "$_current_proxy_pid" ]] && kill -0 "$_current_proxy_pid" 2>/dev/null; then
         kill "$_current_proxy_pid" 2>/dev/null || true
-        wait "$_current_proxy_pid" 2>/dev/null || true
+        # 等 proxy 退出，最多 5 秒
+        for _ in $(seq 1 25); do
+            if ! kill -0 "$_current_proxy_pid" 2>/dev/null; then break; fi
+            sleep 0.2
+        done
+        # 还没死就 SIGKILL
+        kill -0 "$_current_proxy_pid" 2>/dev/null && kill -9 "$_current_proxy_pid" 2>/dev/null || true
     fi
     exit 0
 }
