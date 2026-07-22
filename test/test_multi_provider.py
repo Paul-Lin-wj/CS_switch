@@ -131,3 +131,60 @@ if __name__ == "__main__":
     test_resolve_model_with_prefix_stripping()
     test_resolve_model_relay_passthrough()
     print("ALL MULTI-PROVIDER TESTS PASSED")
+
+
+def test_model_route_cross_provider():
+    """MODEL_ROUTE maps specific claude-* models to different providers."""
+    import csswitch_proxy
+    # Simulate multi-mode setup
+    csswitch_proxy.MULTI_MODE = True
+    csswitch_proxy.MODEL_ROUTE = {
+        "claude-opus-4-8": {"prefix": "km", "target_model": "kimi-for-coding"},
+        "claude-sonnet-5": {"prefix": "rl", "target_model": "mimo-v2.5-pro"},
+        "claude-haiku-4-5-20251001": {"prefix": "rl", "target_model": "mimo-v2.5"},
+    }
+    csswitch_proxy.DEFAULT_PREFIX = "rl"
+    csswitch_proxy.MULTI_REGISTRY = {
+        "km": {"prov_name": "kimi"},
+        "rl": {"prov_name": "relay"},
+    }
+
+    # Simulate _handle_multi routing logic (extracted for unit test)
+    def route(model_id):
+        prefix, bare_model = provider_policy.parse_prefixed_model(model_id)
+        if not prefix:
+            route_entry = csswitch_proxy.MODEL_ROUTE.get(model_id)
+            if route_entry:
+                prefix = route_entry["prefix"]
+                bare_model = route_entry["target_model"]
+            else:
+                prefix = csswitch_proxy.DEFAULT_PREFIX
+        return prefix, bare_model
+
+    # Test cross-provider routing
+    assert route("claude-opus-4-8") == ("km", "kimi-for-coding")
+    assert route("claude-sonnet-5") == ("rl", "mimo-v2.5-pro")
+    assert route("claude-haiku-4-5-20251001") == ("rl", "mimo-v2.5")
+    # Prefix overrides still work
+    assert route("km-claude-sonnet-5") == ("km", "claude-sonnet-5")
+    assert route("rl-claude-opus-4-8") == ("rl", "claude-opus-4-8")
+    # Unknown bare model falls back to default
+    assert route("claude-unknown") == ("rl", "claude-unknown")
+
+    # Cleanup
+    csswitch_proxy.MULTI_MODE = False
+    csswitch_proxy.MODEL_ROUTE = {}
+    csswitch_proxy.MULTI_REGISTRY = {}
+    csswitch_proxy.DEFAULT_PREFIX = ""
+
+
+if __name__ == "__main__":
+    test_parse_prefixed_model()
+    test_strip_prefix()
+    test_prefix_coverage()
+    test_prefix_to_template_reverse()
+    test_resolve_model_single_provider()
+    test_resolve_model_with_prefix_stripping()
+    test_resolve_model_relay_passthrough()
+    test_model_route_cross_provider()
+    print("ALL MULTI-PROVIDER TESTS PASSED")

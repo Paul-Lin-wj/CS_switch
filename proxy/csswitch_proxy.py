@@ -165,6 +165,7 @@ AUTH_SECRET = None  # 未设则不启用鉴权（保持旧行为）
 MULTI_MODE = False
 MULTI_REGISTRY = {}  # prefix -> {"prov": dict, "key": str, "prov_name": str, "policy": Policy, ...}
 DEFAULT_PREFIX = ""  # prefix for bare claude-* fallback
+MODEL_ROUTE = {}  # model_id -> {"prefix": str, "target_model": str} cross-provider routing
 _thread_ctx = threading.local()
 # relay 模式：最近一次 /v1/models 回源拉到的上游模型 id 列表。resolve_model 用它把
 # Science 发来的裸 id（如标题 agent 的 claude-haiku-4-5）贴合到中转站真实 id
@@ -972,7 +973,13 @@ class H(BaseHTTPRequestHandler):
         model_id = areq.get("model", "")
         prefix, bare_model = provider_policy.parse_prefixed_model(model_id)
         if not prefix:
-            prefix = DEFAULT_PREFIX
+            # Check cross-provider model route first (e.g. claude-opus-4-8 -> km/kimi-for-coding)
+            route = MODEL_ROUTE.get(model_id)
+            if route:
+                prefix = route["prefix"]
+                bare_model = route["target_model"]
+            else:
+                prefix = DEFAULT_PREFIX
         entry = MULTI_REGISTRY.get(prefix)
         if not entry:
             self._send_json(400, {"type": "error", "error": {
@@ -1219,6 +1226,7 @@ if __name__ == "__main__":
     MULTI_MODE = False
     MULTI_REGISTRY = {}
     DEFAULT_PREFIX = ""
+    MODEL_ROUTE = {}
     # multi-config 必须在 provider 验证之前处理：multi 模式下各 provider 的
     # base_url/key 从 JSON 文件读取，不需要 --relay-base 等 CLI 参数。
     MULTI_MODE = False
@@ -1301,8 +1309,12 @@ if __name__ == "__main__":
         sys.exit(1)
     SHIM_MODE = dsml_shim.shim_mode(PROV_NAME, PROV)
     if MULTI_MODE:
+        # Load model routes from config
+        for mr in mc.get("model_routes", []):
+            MODEL_ROUTE[mr["model_id"]] = {"prefix": mr["prefix"], "target_model": mr["target_model"]}
         log(f"CSSwitch 代理启动 127.0.0.1:{args.port}  mode=multi  "
-            f"providers={list(MULTI_REGISTRY.keys())}  default={DEFAULT_PREFIX}")
+            f"providers={list(MULTI_REGISTRY.keys())}  default={DEFAULT_PREFIX}  "
+            f"model_routes={len(MODEL_ROUTE)}")
     else:
         log(f"CSSwitch 代理启动 127.0.0.1:{args.port}  provider={PROV_NAME}  "
             f"key=已加载(未显示)  上游={PROV['url']}  dsml_shim={SHIM_MODE}")

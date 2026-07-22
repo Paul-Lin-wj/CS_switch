@@ -109,6 +109,9 @@ def default_config():
         # default_provider: profile ID for bare claude-* requests (Science internals)
         "active_providers": [],
         "default_provider": "",
+        # Per-model cross-provider routing (schema v3):
+        # Each entry: {"model_id": "claude-opus-4-8", "prefix": "km", "target_model": "kimi-for-coding"}
+        "model_routes": [],
     }
 
 
@@ -353,7 +356,55 @@ def cmd_multi_config(args):
         "default_prefix": default_prefix,
         "providers": providers,
     }
+    result["model_routes"] = cfg.get("model_routes", [])
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_set_model_route(args):
+    """Route a specific claude-* model ID to a different provider and target model."""
+    cfg = load_config()
+    if cfg.get("mode") != "multi":
+        print(json.dumps({"error": "model routes require mode=multi"}, ensure_ascii=False))
+        return 1
+    # Validate prefix exists in active providers
+    active_ids = set(cfg.get("active_providers", []))
+    profiles_by_id = {p["id"]: p for p in cfg.get("profiles", [])}
+    valid_prefixes = set()
+    for pid in active_ids:
+        prof = profiles_by_id.get(pid)
+        if prof:
+            valid_prefixes.add(prefix_for_template(prof.get("template_id", "")))
+    if args.prefix not in valid_prefixes:
+        print(json.dumps({"error": f"prefix '{args.prefix}' not in active providers", 
+                          "valid": sorted(valid_prefixes)}, ensure_ascii=False))
+        return 1
+    routes = cfg.get("model_routes", [])
+    # Update or add
+    found = False
+    for r in routes:
+        if r["model_id"] == args.model_id:
+            r["prefix"] = args.prefix
+            r["target_model"] = args.target_model
+            found = True
+            break
+    if not found:
+        routes.append({"model_id": args.model_id, "prefix": args.prefix,
+                        "target_model": args.target_model})
+    cfg["model_routes"] = routes
+    save_config(cfg)
+    print(json.dumps({"ok": True, "model_id": args.model_id, "prefix": args.prefix,
+                       "target_model": args.target_model}, ensure_ascii=False))
+    return 0
+
+
+def cmd_clear_model_route(args):
+    """Remove a model route."""
+    cfg = load_config()
+    routes = cfg.get("model_routes", [])
+    cfg["model_routes"] = [r for r in routes if r["model_id"] != args.model_id]
+    save_config(cfg)
+    print(json.dumps({"ok": True, "removed": args.model_id}, ensure_ascii=False))
     return 0
 
 def main():
@@ -394,6 +445,14 @@ def main():
 
     sub.add_parser("multi-config", help="return multi-provider config for proxy launcher")
 
+    p_smr = sub.add_parser("set-model-route", help="route a claude-* model to a specific provider")
+    p_smr.add_argument("model_id", help="e.g. claude-opus-4-8")
+    p_smr.add_argument("prefix", help="provider prefix, e.g. km, rl, ds")
+    p_smr.add_argument("target_model", help="real model name, e.g. kimi-for-coding")
+
+    p_cmr = sub.add_parser("clear-model-route", help="remove a model route")
+    p_cmr.add_argument("model_id")
+
     args = parser.parse_args()
     handlers = {
         "load": cmd_load,
@@ -408,6 +467,8 @@ def main():
         "set-active-providers": cmd_set_active_providers,
         "set-default-provider": cmd_set_default_provider,
         "multi-config": cmd_multi_config,
+        "set-model-route": cmd_set_model_route,
+        "clear-model-route": cmd_clear_model_route,
     }
     try:
         return handlers[args.cmd](args)
