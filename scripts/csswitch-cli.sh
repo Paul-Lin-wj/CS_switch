@@ -539,6 +539,43 @@ print_access_info() {
   echo "  内容页 : http://127.0.0.1:$content_port"
 }
 
+_kill_all_on_port() {
+  local port="$1" script_rex="$2"
+  # SIGTERM watchdog + proxy
+  pkill -f "proxy-watchdog" 2>/dev/null || true
+  pkill -f "${script_rex}.*--port ${port}" 2>/dev/null || true
+  sleep 0.5
+  # 等待退出（最多 5 秒）
+  for _ in $(seq 1 25); do
+    pgrep -f "proxy-watchdog" >/dev/null 2>&1 || pgrep -f "${script_rex}.*--port ${port}" >/dev/null 2>&1 || break
+    sleep 0.2
+  done
+  # SIGKILL 兜底
+  pkill -9 -f "proxy-watchdog" 2>/dev/null || true
+  pkill -9 -f "${script_rex}.*--port ${port}" 2>/dev/null || true
+  sleep 0.3
+  # 等待端口释放（最多 5 秒）
+  for _ in $(seq 1 50); do
+    ss -tlnp "sport = :${port}" 2>/dev/null | grep -q "LISTEN" || break
+    sleep 0.1
+  done
+  # 按端口 SIGKILL
+  local port_pids
+  port_pids=$(ss -tlnp "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
+  if [[ -n "$port_pids" ]]; then
+    echo "$port_pids" | xargs kill -9 2>/dev/null || true
+    sleep 0.5
+  fi
+}
+
+_check_all_stopped() {
+  local port="$1" script_rex="$2"
+  pgrep -f "proxy-watchdog" >/dev/null 2>&1 && return 1
+  pgrep -f "${script_rex}.*--port ${port}" >/dev/null 2>&1 && return 1
+  ss -tlnp "sport = :${port}" 2>/dev/null | grep -q "LISTEN" && return 1
+  return 0
+}
+
 do_stop() {
   msg "停止沙箱..."
   SANDBOX_HOME="$SANDBOX_HOME" "$STOP" || true
@@ -549,68 +586,25 @@ do_stop() {
   local script_rex
   script_rex=$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "$script")
 
-  # ── Phase 1: 优雅停止 watchdog（SIGTERM，它会连带杀 proxy） ──
-  # watchdog 命令行不含端口号，直接 pkill 匹配脚本名即可（单实例）
-  pkill -f "proxy-watchdog" 2>/dev/null || true
-  sleep 0.5
-
-  # ── Phase 2: 停 proxy（watchdog 可能没杀干净） ──
-  pkill -f "${script_rex}.*--port ${port}" 2>/dev/null || true
-  sleep 0.5
-
-  # ── Phase 3: 等待进程退出（最多 5 秒） ──
-  for _ in $(seq 1 25); do
-    local any_alive=""
-    pgrep -f "proxy-watchdog" >/dev/null 2>&1 && any_alive="1"
-    pgrep -f "${script_rex}.*--port ${port}" >/dev/null 2>&1 && any_alive="1"
-    [[ -z "$any_alive" ]] && break
-    sleep 0.2
-  done
-
-  # ── Phase 4: SIGKILL 兜底（SIGTERM 没杀掉的） ──
-  pkill -9 -f "proxy-watchdog" 2>/dev/null || true
-  pkill -9 -f "${script_rex}.*--port ${port}" 2>/dev/null || true
-
-  # ── Phase 5: 等待端口释放（最多 5 秒） ──
-  for _ in $(seq 1 50); do
-    if ! ss -tlnp "sport = :${port}" 2>/dev/null | grep -q "LISTEN"; then
-      break
+  local max_rounds=3
+  for round in $(seq 1 $max_rounds); do
+    _kill_all_on_port "$port" "$script_rex"
+    if _check_all_stopped "$port" "$script_rex"; then
+      msg "已停止。沙箱、代理、端口均已清理。"
+      return 0
     fi
-    sleep 0.1
+    if [[ "$round" -lt "$max_rounds" ]]; then
+      msg "第 ${round} 轮未完全清理，重试..."
+      sleep 1
+    fi
   done
 
-  # ── Phase 6: 按端口 SIGKILL 兜底 ──
-  local port_pids
-  port_pids=$(ss -tlnp "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
-  if [[ -n "$port_pids" ]]; then
-    echo "$port_pids" | xargs kill -9 2>/dev/null || true
-    sleep 0.5
-  fi
-
-  # ── 验证：确认一切已停止 ──
-  local ok=1
-  # 检查 watchdog
-  if pgrep -f "proxy-watchdog" >/dev/null 2>&1; then
-    err "警告：watchdog 进程仍然存活"
-    ok=0
-  fi
-  # 检查 proxy
-  if pgrep -f "${script_rex}.*--port ${port}" >/dev/null 2>&1; then
-    err "警告：代理进程仍然存活"
-    ok=0
-  fi
-  # 检查端口
-  if ss -tlnp "sport = :${port}" 2>/dev/null | grep -q "LISTEN"; then
-    err "警告：端口 ${port} 仍被占用"
-    ok=0
-  fi
-  if [[ "$ok" == "1" ]]; then
-    msg "已停止。沙箱、代理、端口均已清理。"
-  else
-    err "部分进程未清理，请手动检查："
-    err "  ps aux | grep -E 'watchdog|csswitch_proxy'"
-    err "  ss -tlnp sport = :${port}"
-  fi
+  # 3 轮都没清理干净
+  err "经过 ${max_rounds} 轮尝试仍有残留："
+  pgrep -f "proxy-watchdog" >/dev/null 2>&1 && err "  - watchdog 进程存活"
+  pgrep -f "${script_rex}.*--port ${port}" >/dev/null 2>&1 && err "  - 代理进程存活"
+  ss -tlnp "sport = :${port}" 2>/dev/null | grep -q "LISTEN" && err "  - 端口 ${port} 仍被占用"
+  err "请手动检查：ps aux | grep -E 'watchdog|csswitch_proxy'"
 }
 
 do_status() {
