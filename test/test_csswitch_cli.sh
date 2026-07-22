@@ -11,7 +11,7 @@ echo "== csswitch-cli integration tests =="
 
 # --- 1. Init creates dirs and config with correct perms ---
 CSSWITCH_DIR="$T/c1" SANDBOX_HOME="$T/c1/sandbox/home" HOME="$T/h1" CSSWITCH_UI=text "$CLI" <<'EOF'
-10
+11
 0
 EOF
 [[ -d "$T/c1/logs" ]] || { echo "FAIL: logs dir not created"; exit 1; }

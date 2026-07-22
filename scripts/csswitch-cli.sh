@@ -68,10 +68,11 @@ text_menu() {
     echo "5) 切换 API 服务商 / profile"
     echo "6) 添加新的 API 提供商"
     echo "7) 编辑 provider 配置"
-    echo "8) 删除 provider"
-    echo "9) 输出登录链接"
-    echo "10) 初始化 CSSwitch 目录"
-    echo "11) 运行诊断"
+    echo "8) 模型路由管理（Science 模型 → 实际模型）"
+    echo "9) 删除 provider"
+    echo "10) 输出登录链接"
+    echo "11) 初始化 CSSwitch 目录"
+    echo "12) 运行诊断"
     echo "0) 退出"
     echo -n "请选择: "
     if ! read -r choice; then
@@ -87,10 +88,11 @@ text_menu() {
       5) do_switch ;;
       6) do_add ;;
       7) do_edit ;;
-      8) do_delete ;;
-      9) do_login_url ;;
-      10) do_init ;;
-      11) do_doctor ;;
+      8) do_model_routes ;;
+      9) do_delete ;;
+      10) do_login_url ;;
+      11) do_init ;;
+      12) do_doctor ;;
       0) echo "再见。"; exit 0 ;;
       *) echo "无效选项，请重新选择。" ;;
     esac
@@ -495,7 +497,7 @@ do_start_multi() {
 
   # Ensure config dir exists
   if [[ ! -d "$CSSWITCH_DIR" ]]; then
-    err "CSSwitch 目录不存在，请先初始化（选项 9）"
+    err "CSSwitch 目录不存在，请先初始化（选项 10）"
     return
   fi
 
@@ -749,6 +751,181 @@ do_edit() {
   msg "已更新: ${names[$((idx-1))]}"
 }
 
+do_model_routes() {
+  # Check multi mode
+  local cfg_mode
+  cfg_mode=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin).get('mode','proxy'))")
+  if [[ "$cfg_mode" != "multi" ]]; then
+    err "模型路由管理仅在多 provider 模式下可用。请先使用选项 2 启动。"
+    return
+  fi
+
+  while true; do
+    # Show current routes
+    echo
+    echo "=== 模型路由管理 ==="
+    echo "当前 Science 模型 → 实际模型映射："
+    echo
+    local routes_json
+    routes_json=$(run_helper load | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+routes = d.get('model_routes', [])
+if not routes:
+    print('（无自定义路由，所有模型走默认 provider）')
+else:
+    profiles = {p['id']: p for p in d.get('profiles', [])}
+    active = set(d.get('active_providers', []))
+    # Build prefix->name map from active providers
+    prefix_name = {}
+    from csswitch_config_helper import prefix_for_template, templates_by_id
+    tpls = {t['id']: t for t in templates_by_id()}
+    for pid in active:
+        prof = profiles.get(pid, {})
+        pfx = prefix_for_template(prof.get('template_id', ''))
+        prefix_name[pfx] = prof.get('name', pfx)
+    for i, r in enumerate(routes, 1):
+        pname = prefix_name.get(r['prefix'], r['prefix'])
+        print(f'  {i}) {r["model_id"]:35s} → {pname}({r["prefix"]}) / {r["target_model"]}')
+" 2>/dev/null)
+    echo "$routes_json"
+    echo
+    echo "  1) 添加/修改路由"
+    echo "  2) 删除路由"
+    echo "  0) 返回主菜单"
+    echo -n "请选择: "
+    read -r route_choice
+    case "$route_choice" in
+      1) _route_add ;;
+      2) _route_delete ;;
+      0) return ;;
+      *) echo "无效选项" ;;
+    esac
+  done
+}
+
+_route_add() {
+  # Science model selection
+  echo
+  echo "选择 Science 模型："
+  echo "  1) claude-opus-4-8（重推理）"
+  echo "  2) claude-sonnet-5（通用）"
+  echo "  3) claude-haiku-4-5-20251001（轻任务）"
+  echo "  4) 自定义输入"
+  echo -n "请选择: "
+  read -r model_choice
+  local model_id
+  case "$model_choice" in
+    1) model_id="claude-opus-4-8" ;;
+    2) model_id="claude-sonnet-5" ;;
+    3) model_id="claude-haiku-4-5-20251001" ;;
+    4)
+      echo -n "输入 Science 模型 ID（如 claude-opus-4-8）: "
+      read -r model_id
+      [[ -z "$model_id" ]] && { err "模型 ID 不能为空"; return; }
+      ;;
+    *) err "无效选项"; return ;;
+  esac
+
+  # Provider selection
+  echo
+  echo "选择目标 Provider："
+  local providers_json
+  providers_json=$(run_helper load | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+profiles = {p['id']: p for p in d.get('profiles', [])}
+active = d.get('active_providers', [])
+from csswitch_config_helper import prefix_for_template
+for i, pid in enumerate(active, 1):
+    prof = profiles.get(pid, {})
+    pfx = prefix_for_template(prof.get('template_id', ''))
+    print(f'{i}|{pfx}|{prof.get("name", "?")}|{prof.get("model", "")}')
+" 2>/dev/null)
+  local i=1
+  while IFS='|' read -r num pfx pname pmodel; do
+    echo "  $num) $pname ($pfx) ${pmodel:+默认模型: $pmodel}"
+    i=$((i + 1))
+  done <<< "$providers_json"
+  echo -n "请选择: "
+  read -r prov_choice
+  local selected_line
+  selected_line=$(echo "$providers_json" | sed -n "${prov_choice}p")
+  if [[ -z "$selected_line" ]]; then
+    err "无效选项"
+    return
+  fi
+  local target_prefix target_name default_model
+  target_prefix=$(echo "$selected_line" | cut -d'|' -f2)
+  target_name=$(echo "$selected_line" | cut -d'|' -f3)
+  default_model=$(echo "$selected_line" | cut -d'|' -f4)
+
+  # Target model name
+  local target_model
+  if [[ -n "$default_model" ]]; then
+    echo -n "目标模型名称 [$default_model]: "
+    read -r target_model
+    target_model="${target_model:-$default_model}"
+  else
+    echo -n "目标模型名称: "
+    read -r target_model
+    [[ -z "$target_model" ]] && { err "模型名称不能为空"; return; }
+  fi
+
+  # Apply
+  run_helper set-model-route "$model_id" "$target_prefix" "$target_model" >/dev/null
+  msg "已设置: $model_id → $target_name($target_prefix) / $target_model"
+
+  # Regenerate multi-config and offer restart
+  export CSSWITCH_CONFIG="$CSSWITCH_DIR/config.json"
+  run_helper multi-config > "$CSSWITCH_DIR/logs/multi-config.json" 2>/dev/null
+  echo -n "是否立即重启代理使路由生效？[Y/n] "
+  read -r restart_ans
+  if [[ "$restart_ans" != "n" && "$restart_ans" != "N" ]]; then
+    local port
+    port=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin)['proxy_port'])")
+    pkill -f "csswitch_proxy.*--port ${port}" 2>/dev/null || true
+    sleep 2
+    msg "代理已重启，新路由生效。"
+  fi
+}
+
+_route_delete() {
+  local routes_json
+  routes_json=$(run_helper load | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+routes = d.get('model_routes', [])
+for i, r in enumerate(routes, 1):
+    print(f'{i}|{r["model_id"]}|{r["prefix"]}|{r["target_model"]}')
+" 2>/dev/null)
+  if [[ -z "$routes_json" ]]; then
+    msg "当前无自定义路由。"
+    return
+  fi
+  echo
+  echo "选择要删除的路由："
+  while IFS='|' read -r num mid pfx tm; do
+    echo "  $num) $mid → $pfx/$tm"
+  done <<< "$routes_json"
+  echo -n "请选择: "
+  read -r del_choice
+  local del_line
+  del_line=$(echo "$routes_json" | sed -n "${del_choice}p")
+  if [[ -z "$del_line" ]]; then
+    err "无效选项"
+    return
+  fi
+  local del_model
+  del_model=$(echo "$del_line" | cut -d'|' -f2)
+  run_helper clear-model-route "$del_model" >/dev/null
+  msg "已删除路由: $del_model"
+
+  # Regenerate multi-config
+  export CSSWITCH_CONFIG="$CSSWITCH_DIR/config.json"
+  run_helper multi-config > "$CSSWITCH_DIR/logs/multi-config.json" 2>/dev/null
+}
+
 do_delete() {
   local profiles
   profiles=$(run_helper list)
@@ -854,10 +1031,11 @@ tui_menu() {
         5 "切换 API 服务商" \
         6 "添加新的 API 提供商" \
         7 "编辑 provider 配置" \
-        8 "删除 provider" \
-        9 "输出登录链接" \
-        10 "初始化 CSSwitch 目录" \
-        11 "运行诊断" \
+        8 "模型路由管理" \
+        9 "删除 provider" \
+        10 "输出登录链接" \
+        11 "初始化 CSSwitch 目录" \
+        12 "运行诊断" \
         0 "退出" \
         2>"$choice_file" || true
     else
@@ -869,10 +1047,11 @@ tui_menu() {
         5 "切换 API 服务商" \
         6 "添加新的 API 提供商" \
         7 "编辑 provider 配置" \
-        8 "删除 provider" \
-        9 "输出登录链接" \
-        10 "初始化 CSSwitch 目录" \
-        11 "运行诊断" \
+        8 "模型路由管理" \
+        9 "删除 provider" \
+        10 "输出登录链接" \
+        11 "初始化 CSSwitch 目录" \
+        12 "运行诊断" \
         0 "退出" \
         2>"$choice_file" || true
     fi
@@ -888,10 +1067,11 @@ tui_menu() {
       5) clear; do_switch ;;
       6) clear; do_add ;;
       7) clear; do_edit ;;
-      8) clear; do_delete ;;
-      9) clear; do_login_url ;;
-      10) clear; do_init ;;
-      11) clear; do_doctor ;;
+      8) clear; do_model_routes ;;
+      9) clear; do_delete ;;
+      10) clear; do_login_url ;;
+      11) clear; do_init ;;
+      12) clear; do_doctor ;;
     esac
     [[ "$choice" != "0" ]] && { echo "按 Enter 继续..."; read -r; }
   done
@@ -900,7 +1080,7 @@ tui_menu() {
 main() {
   ensure_helper
   if [[ ! -d "$CSSWITCH_DIR" ]]; then
-    echo "CSSwitch 目录不存在，请先运行初始化（选项 9）。" >&2
+    echo "CSSwitch 目录不存在，请先运行初始化（选项 10）。" >&2
   fi
   if [[ -n "$UI_TOOL" ]]; then
     tui_menu
