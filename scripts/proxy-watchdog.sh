@@ -20,6 +20,22 @@ PROXY_ADAPTER="${PROXY_ADAPTER:?}"
 PROXY_LOG="${PROXY_LOG:-/dev/null}"
 PROXY_ARGS="${PROXY_ARGS:-}"
 
+# Lock file: prevents multiple watchdogs on the same port
+LOCK_FILE="/tmp/csswitch-watchdog-${PROXY_PORT}.lock"
+_cleanup_lock() { rm -f "$LOCK_FILE" 2>/dev/null || true; }
+
+# Check for stale lock
+if [[ -f "$LOCK_FILE" ]]; then
+    old_pid=$(cat "$LOCK_FILE" 2>/dev/null || true)
+    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+        echo "[$(date '+%H:%M:%S')] 另一个 watchdog (PID=$old_pid) 已在运行，退出。" >> "$PROXY_LOG"
+        exit 0
+    fi
+    # Stale lock, remove it
+    rm -f "$LOCK_FILE" 2>/dev/null || true
+fi
+echo $$ > "$LOCK_FILE"
+
 # Signal handler: when watchdog is killed (SIGTERM/SIGINT), also kill the proxy.
 # Without this, pkill on watchdog leaves the proxy orphaned, and the new watchdog
 # immediately starts another proxy on the same port → "Address already in use".
@@ -27,18 +43,16 @@ _current_proxy_pid=""
 _shutdown() {
     echo "[$(date '+%H:%M:%S')] watchdog 收到信号，正在关闭..." >> "$PROXY_LOG"
     if [[ -n "$_current_proxy_pid" ]] && kill -0 "$_current_proxy_pid" 2>/dev/null; then
-        kill "$_current_proxy_pid" 2>/dev/null || true
-        # 等 proxy 退出，最多 5 秒
-        for _ in $(seq 1 25); do
-            if ! kill -0 "$_current_proxy_pid" 2>/dev/null; then break; fi
-            sleep 0.2
-        done
-        # 还没死就 SIGKILL
-        kill -0 "$_current_proxy_pid" 2>/dev/null && kill -9 "$_current_proxy_pid" 2>/dev/null || true
+        # 用 SIGKILL 直接杀死代理，不触发代理的 SIGTERM handler（避免重复关闭日志）
+        kill -9 "$_current_proxy_pid" 2>/dev/null || true
+        wait "$_current_proxy_pid" 2>/dev/null || true
     fi
+    _cleanup_lock
     exit 0
 }
-trap _shutdown SIGTERM SIGINT SIGHUP
+# 只捕获 SIGTERM（do_stop）和 SIGINT（Ctrl+C），不捕获 SIGHUP。
+# SIGHUP 是终端关闭信号，不应杀死代理——代理应在后台继续运行。
+trap _shutdown SIGTERM SIGINT
 
 MAX_RETRIES=50          # 最大连续重启次数（防止无限循环）
 MAX_PORT_RETRIES=10     # 端口占用最大重试次数
@@ -79,6 +93,7 @@ while (( retry < MAX_RETRIES )); do
   # 检查是否被外部 pkill 杀死（SIGTERM=143, SIGKILL=137）
   # 这些情况下不重启（说明是用户主动停止）
   if (( exit_code == 143 || exit_code == 137 )); then
+    _cleanup_lock
     echo "[$(date '+%H:%M:%S')] 代理被外部信号终止 (exit=$exit_code)，停止保活。" >> "$PROXY_LOG"
     exit 0
   fi
@@ -87,6 +102,7 @@ while (( retry < MAX_RETRIES )); do
   if (( runtime < QUICK_EXIT && (exit_code == 2 || exit_code == 0) )); then
     port_retry=$((port_retry + 1))
     if (( port_retry >= MAX_PORT_RETRIES )); then
+      _cleanup_lock
       echo "[$(date '+%H:%M:%S')] 端口绑定失败达 $MAX_PORT_RETRIES 次，停止保活。" >> "$PROXY_LOG"
       exit 1
     fi
@@ -119,5 +135,6 @@ while (( retry < MAX_RETRIES )); do
   (( delay > MAX_DELAY )) && delay="$MAX_DELAY"
 done
 
+_cleanup_lock
 echo "[$(date '+%H:%M:%S')] 达到最大重试次数 ($MAX_RETRIES)，停止保活。" >> "$PROXY_LOG"
 exit 1

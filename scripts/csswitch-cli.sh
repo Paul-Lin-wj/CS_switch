@@ -53,7 +53,7 @@ err() {
 
 run_helper() {
   ensure_helper
-  CSSWITCH_CONFIG="$CSSWITCH_DIR/config.json" python3 "$HELPER" "$@"
+  PYTHONPATH="$PROJ/scripts${PYTHONPATH:+:$PYTHONPATH}" CSSWITCH_CONFIG="$CSSWITCH_DIR/config.json" python3 "$HELPER" "$@"
 }
 
 # Plain text menu.
@@ -340,6 +340,10 @@ print('1' if t['requires_model'] else '')
       fi
     done <<< "$_all_wd"
   fi
+  # 等待旧 watchdog 退出（它的信号处理器会连带杀 proxy）
+  sleep 1
+  # 清理残留锁文件（旧 watchdog 可能没来得及清理）
+  rm -f "/tmp/csswitch-watchdog-${proxy_port}.lock" 2>/dev/null || true
   # 方法 3：按端口查找并杀死占用进程（兜底 pkill 匹配失败的情况）
   local pids
   pids=$(ss -tlnp "sport = :${proxy_port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
@@ -543,9 +547,8 @@ print_access_info() {
 
 _kill_all_on_port() {
   local port="$1" script_rex="$2"
-  # SIGTERM watchdog + proxy
+  # 只 SIGTERM watchdog，watchdog 的 handler 会杀 proxy（避免 proxy 收到两次 SIGTERM）
   pkill -f "proxy-watchdog" 2>/dev/null || true
-  pkill -f "${script_rex}.*--port ${port}" 2>/dev/null || true
   sleep 0.5
   # 等待退出（最多 5 秒）
   for _ in $(seq 1 25); do
@@ -752,6 +755,7 @@ do_edit() {
 }
 
 do_model_routes() {
+  set +e  # Disable errexit for interactive menu (input errors must not kill script)
   # Check multi mode
   local cfg_mode
   cfg_mode=$(run_helper load | python3 -c "import sys,json; print(json.load(sys.stdin).get('mode','proxy'))")
@@ -767,7 +771,7 @@ do_model_routes() {
     echo "当前 Science 模型 → 实际模型映射："
     echo
     local routes_json
-    routes_json=$(run_helper load | python3 -c "
+    routes_json=$(run_helper load | PYTHONPATH="$PROJ/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 routes = d.get('model_routes', [])
@@ -798,7 +802,7 @@ else:
     case "$route_choice" in
       1) _route_add ;;
       2) _route_delete ;;
-      0) return ;;
+      0) set -e; return ;;
       *) echo "无效选项" ;;
     esac
   done
@@ -831,7 +835,7 @@ _route_add() {
   echo
   echo "选择目标 Provider："
   local providers_json
-  providers_json=$(run_helper load | python3 -c "
+  providers_json=$(run_helper load | PYTHONPATH="$PROJ/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 profiles = {p['id']: p for p in d.get('profiles', [])}
@@ -850,7 +854,7 @@ for i, pid in enumerate(active, 1):
   echo -n "请选择: "
   read -r prov_choice
   local selected_line
-  selected_line=$(echo "$providers_json" | sed -n "${prov_choice}p")
+  selected_line=$(echo "$providers_json" | sed -n "${prov_choice:-0}p")
   if [[ -z "$selected_line" ]]; then
     err "无效选项"
     return
@@ -892,7 +896,7 @@ for i, pid in enumerate(active, 1):
 
 _route_delete() {
   local routes_json
-  routes_json=$(run_helper load | python3 -c "
+  routes_json=$(run_helper load | PYTHONPATH="$PROJ/scripts${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 routes = d.get('model_routes', [])
@@ -911,7 +915,7 @@ for i, r in enumerate(routes, 1):
   echo -n "请选择: "
   read -r del_choice
   local del_line
-  del_line=$(echo "$routes_json" | sed -n "${del_choice}p")
+  del_line=$(echo "$routes_json" | sed -n "${del_choice:-0}p")
   if [[ -z "$del_line" ]]; then
     err "无效选项"
     return
