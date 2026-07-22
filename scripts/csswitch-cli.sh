@@ -329,10 +329,15 @@ print('1' if t['requires_model'] else '')
   # 方法 1：pkill 匹配脚本路径 + 端口
   pkill -f "${script_rex}.*--port ${proxy_port}" 2>/dev/null || true
   # 方法 2：匹配 watchdog（端口在环境变量，不在命令行）
-  pgrep -f "proxy-watchdog" 2>/dev/null | while read p; do
-    grep -qz "PROXY_PORT=${proxy_port}" /proc/$p/environ 2>/dev/null && kill "$p" 2>/dev/null || true
-  done
-  pkill -f "proxy-watchdog.*${proxy_port}" 2>/dev/null || true
+  local _all_wd
+  _all_wd=$(pgrep -f "proxy-watchdog" 2>/dev/null) || true
+  if [[ -n "$_all_wd" ]]; then
+    while IFS= read -r _wp; do
+      if [[ -r "/proc/$_wp/environ" ]] && grep -qz "PROXY_PORT=${proxy_port}" "/proc/$_wp/environ" 2>/dev/null; then
+        kill "$_wp" 2>/dev/null || true
+      fi
+    done <<< "$_all_wd"
+  fi
   # 方法 3：按端口查找并杀死占用进程（兜底 pkill 匹配失败的情况）
   local pids
   pids=$(ss -tlnp "sport = :${proxy_port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
@@ -544,19 +549,27 @@ do_stop() {
   local script_rex
   script_rex=$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "$script")
 
-  # 1) 停 watchdog：用环境变量 PROXY_PORT 匹配（端口号不在命令行中）
-  local wd_pids
-  wd_pids=$(pgrep -f "proxy-watchdog" 2>/dev/null | while read p; do
-    grep -qz "PROXY_PORT=${port}" /proc/$p/environ 2>/dev/null && echo "$p"
-  done || true)
-  # 也匹配 pkill -f 中带端口的（旧版 watchdog 可能在命令行中）
-  wd_pids="$wd_pids $(pgrep -f "proxy-watchdog.*${port}" 2>/dev/null || true)"
+  # 1) 停 watchdog：用 /proc/<pid>/environ 匹配 PROXY_PORT
+  local wd_pids=""
+  local all_wd
+  all_wd=$(pgrep -f "proxy-watchdog" 2>/dev/null) || true
+  if [[ -n "$all_wd" ]]; then
+    while IFS= read -r _wp; do
+      if [[ -r "/proc/$_wp/environ" ]] && grep -qz "PROXY_PORT=${port}" "/proc/$_wp/environ" 2>/dev/null; then
+        wd_pids="$wd_pids $_wp"
+      fi
+    done <<< "$all_wd"
+  fi
   wd_pids=$(echo "$wd_pids" | tr ' ' '
-' | sort -u | grep -v '^$' || true)
+' | grep -v '^$' | sort -u || true)
   if [[ -n "$wd_pids" ]]; then
     echo "$wd_pids" | xargs kill 2>/dev/null || true
     for _ in $(seq 1 30); do
-      if ! echo "$wd_pids" | xargs kill -0 2>/dev/null; then break; fi
+      local still_alive=""
+      for _wp in $wd_pids; do
+        kill -0 "$_wp" 2>/dev/null && still_alive="1"
+      done
+      [[ -z "$still_alive" ]] && break
       sleep 0.2
     done
   fi
