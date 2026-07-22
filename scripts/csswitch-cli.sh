@@ -328,7 +328,10 @@ print('1' if t['requires_model'] else '')
   script_rex=$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "$script")
   # 方法 1：pkill 匹配脚本路径 + 端口
   pkill -f "${script_rex}.*--port ${proxy_port}" 2>/dev/null || true
-  # 方法 2：pkill 匹配 watchdog
+  # 方法 2：匹配 watchdog（端口在环境变量，不在命令行）
+  pgrep -f "proxy-watchdog" 2>/dev/null | while read p; do
+    grep -qz "PROXY_PORT=${proxy_port}" /proc/$p/environ 2>/dev/null && kill "$p" 2>/dev/null || true
+  done
   pkill -f "proxy-watchdog.*${proxy_port}" 2>/dev/null || true
   # 方法 3：按端口查找并杀死占用进程（兜底 pkill 匹配失败的情况）
   local pids
@@ -541,9 +544,15 @@ do_stop() {
   local script_rex
   script_rex=$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "$script")
 
-  # 1) 停 watchdog：发 SIGTERM 并等待它退出（watchdog 会连带杀 proxy）
+  # 1) 停 watchdog：用环境变量 PROXY_PORT 匹配（端口号不在命令行中）
   local wd_pids
-  wd_pids=$(pgrep -f "proxy-watchdog.*${port}" 2>/dev/null || true)
+  wd_pids=$(pgrep -f "proxy-watchdog" 2>/dev/null | while read p; do
+    grep -qz "PROXY_PORT=${port}" /proc/$p/environ 2>/dev/null && echo "$p"
+  done || true)
+  # 也匹配 pkill -f 中带端口的（旧版 watchdog 可能在命令行中）
+  wd_pids="$wd_pids $(pgrep -f "proxy-watchdog.*${port}" 2>/dev/null || true)"
+  wd_pids=$(echo "$wd_pids" | tr ' ' '
+' | sort -u | grep -v '^$' || true)
   if [[ -n "$wd_pids" ]]; then
     echo "$wd_pids" | xargs kill 2>/dev/null || true
     for _ in $(seq 1 30); do
