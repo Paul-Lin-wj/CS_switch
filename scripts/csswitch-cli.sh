@@ -428,11 +428,11 @@ with open('$env_file', 'w') as f:
   fi
 
   msg "启动沙箱 (port=$sandbox_port)..."
-  local no_sandbox_flag=""
-  echo -n "是否使用 --no-sandbox 解除沙箱网络限制（允许镜像站下载）? [y/N] "
+  local no_sandbox_flag="--no-sandbox"
+  echo -n "是否使用 --no-sandbox 解除沙箱网络限制（允许镜像站下载）? [Y/n] "
   read -r no_sandbox_ans
-  if [[ "$no_sandbox_ans" == "y" || "$no_sandbox_ans" == "Y" ]]; then
-    no_sandbox_flag="--no-sandbox"
+  if [[ "$no_sandbox_ans" == "n" || "$no_sandbox_ans" == "N" ]]; then
+    no_sandbox_flag=""
   fi
 
   local launch_args=(
