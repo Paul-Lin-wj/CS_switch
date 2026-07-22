@@ -466,13 +466,13 @@ def build_multi_models_response():
             names = []
             for r in providers_for_model:
                 entry = MULTI_REGISTRY.get(r["prefix"], {})
-                pname = entry.get("prov_name", r["prefix"])
+                pname = entry.get("display_name") or entry.get("prov_name", r["prefix"])
                 names.append(f"{pname}/{r['target_model']}")
             display_name = f"{display} [{', '.join(names)}]"
         else:
             # No route: uses default provider
             entry = MULTI_REGISTRY.get(DEFAULT_PREFIX, {})
-            pname = entry.get("prov_name", DEFAULT_PREFIX)
+            pname = entry.get("display_name") or entry.get("prov_name", DEFAULT_PREFIX)
             display_name = f"{display} [{pname}]"
         all_models.append({
             "type": "model", "id": model_id,
@@ -1289,6 +1289,7 @@ if __name__ == "__main__":
             pol = provider_policy.policy_from_prov(prov)
             MULTI_REGISTRY[pfx] = {
                 "prov": prov, "key": pkey, "prov_name": adapter,
+                "display_name": p_entry.get("name") or tpl_id,
                 "policy": pol, "relay_force_model": rfm,
                 "relay_models": [], "relay_thinking": None,
             }
