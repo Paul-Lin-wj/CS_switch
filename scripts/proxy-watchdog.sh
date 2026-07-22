@@ -20,6 +20,20 @@ PROXY_ADAPTER="${PROXY_ADAPTER:?}"
 PROXY_LOG="${PROXY_LOG:-/dev/null}"
 PROXY_ARGS="${PROXY_ARGS:-}"
 
+# Signal handler: when watchdog is killed (SIGTERM/SIGINT), also kill the proxy.
+# Without this, pkill on watchdog leaves the proxy orphaned, and the new watchdog
+# immediately starts another proxy on the same port → "Address already in use".
+_current_proxy_pid=""
+_shutdown() {
+    echo "[$(date '+%H:%M:%S')] watchdog 收到信号，正在关闭..." >> "$PROXY_LOG"
+    if [[ -n "$_current_proxy_pid" ]] && kill -0 "$_current_proxy_pid" 2>/dev/null; then
+        kill "$_current_proxy_pid" 2>/dev/null || true
+        wait "$_current_proxy_pid" 2>/dev/null || true
+    fi
+    exit 0
+}
+trap _shutdown SIGTERM SIGINT SIGHUP
+
 MAX_RETRIES=50          # 最大连续重启次数（防止无限循环）
 MAX_PORT_RETRIES=10     # 端口占用最大重试次数
 BASE_DELAY=2            # 首次重启等待秒数
@@ -45,6 +59,7 @@ while (( retry < MAX_RETRIES )); do
     $PROXY_ARGS \
     >> "$PROXY_LOG" 2>&1 &
   proxy_pid=$!
+  _current_proxy_pid="$proxy_pid"
 
   # 等待代理进程退出
   wait "$proxy_pid" 2>/dev/null || true
