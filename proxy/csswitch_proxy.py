@@ -437,48 +437,64 @@ def build_models_response():
                  "last_id": data[-1]["id"] if data else None}
 
 
+# Science requires model IDs starting with "claude-" for the selector.
+# In multi mode, each provider claims the same claude-* IDs, with
+# model_routes + prefix routing deciding which backend handles each.
+_SCIENCE_MODELS = [
+    ("claude-opus-4-8", "Claude Opus"),
+    ("claude-sonnet-5", "Claude Sonnet"),
+    ("claude-haiku-4-5-20251001", "Claude Haiku"),
+]
+
 def build_multi_models_response():
-    """Merge models from all registered providers with prefixed IDs."""
+    """Return claude-* models with provider info in display names.
+
+    Science selector needs claude- prefixed IDs. Each model appears once,
+    with display names showing which providers handle it via model_routes.
+    Prefixed IDs (km-claude-*) are also included for manual selection.
+    """
     all_models = []
+    seen = set()
+    # Build model_routes reverse map: model_id -> list of (prefix, target_model, prov_name)
+    route_map = {}
+    for model_id, route in MODEL_ROUTE.items():
+        route_map.setdefault(model_id, []).append(route)
+    # Add claude-* models that Science expects
+    for model_id, display in _SCIENCE_MODELS:
+        providers_for_model = route_map.get(model_id, [])
+        if providers_for_model:
+            names = []
+            for r in providers_for_model:
+                entry = MULTI_REGISTRY.get(r["prefix"], {})
+                pname = entry.get("prov_name", r["prefix"])
+                names.append(f"{pname}/{r['target_model']}")
+            display_name = f"{display} [{', '.join(names)}]"
+        else:
+            # No route: uses default provider
+            entry = MULTI_REGISTRY.get(DEFAULT_PREFIX, {})
+            pname = entry.get("prov_name", DEFAULT_PREFIX)
+            display_name = f"{display} [{pname}]"
+        all_models.append({
+            "type": "model", "id": model_id,
+            "display_name": display_name,
+            "supports_tools": True,
+            "created_at": "2026-01-01T00:00:00Z",
+        })
+        seen.add(model_id)
+    # Add prefixed provider models (for explicit selection)
     for prefix, entry in sorted(MULTI_REGISTRY.items()):
         prov = entry["prov"]
         prov_name = entry["prov_name"]
         for mid, display in prov.get("models", []):
             prefixed_id = f"{prefix}-{mid}"
-            all_models.append({
-                "type": "model", "id": prefixed_id,
-                "display_name": display,
-                "supports_tools": True,
-                "created_at": "2026-01-01T00:00:00Z",
-            })
-        if prov.get("models_url"):
-            try:
-                tmp_key = entry["key"]
-                headers = {}
-                style = prov.get("auth_style", "x-api-key")
-                if style in ("x-api-key", "both"):
-                    headers["x-api-key"] = tmp_key
-                if style in ("bearer", "both"):
-                    headers["Authorization"] = f"Bearer {tmp_key}"
-                if prov_name == "relay":
-                    headers["anthropic-version"] = "2023-06-01"
-                raw = http_get_json(prov["models_url"], headers)
-                data_m = raw.get("data") if isinstance(raw, dict) else raw
-                for m in data_m or []:
-                    mid = m.get("id") if isinstance(m, dict) else None
-                    if not mid:
-                        continue
-                    prefixed_id = f"{prefix}-{mid}"
-                    sp = m.get("supported_parameters") if isinstance(m, dict) else None
-                    supports_tools = ("tools" in sp) if isinstance(sp, list) else None
-                    all_models.append({
-                        "type": "model", "id": prefixed_id,
-                        "display_name": (m.get("display_name") or mid),
-                        "supports_tools": supports_tools,
-                        "created_at": "2026-01-01T00:00:00Z",
-                    })
-            except Exception as e:
-                log(f"  multi-models: {prov_name} upstream failed: {e}")
+            if prefixed_id not in seen:
+                all_models.append({
+                    "type": "model", "id": prefixed_id,
+                    "display_name": f"{display} [{prov_name}]",
+                    "supports_tools": True,
+                    "created_at": "2026-01-01T00:00:00Z",
+                })
+                seen.add(prefixed_id)
     log(f"GET /v1/models -> multi: {len(all_models)} models from {len(MULTI_REGISTRY)} providers")
     return 200, {"data": all_models, "has_more": False,
                  "first_id": all_models[0]["id"] if all_models else None,
@@ -1016,9 +1032,18 @@ class H(BaseHTTPRequestHandler):
         _rm = getattr(_thread_ctx, "relay_models", None)
         _rt = getattr(_thread_ctx, "relay_thinking", None)
         if _policy:
+            # When model_route provides a target_model, disable force_model_override
+            # so resolve_model doesn't replace the route's target with the config model.
+            effective_policy = _policy
+            if _rfm and _policy.force_model_override:
+                # Only keep force if rfm is the provider's own config model,
+                # not something set by model_route routing.
+                from dataclasses import replace as _dc_replace
+                effective_policy = _dc_replace(_policy, force_model_override=False)
             state = provider_policy.ProviderState(
-                policy=_policy, prov_name=_pname,
-                relay_force_model=_rfm, relay_models=_rm or [],
+                policy=effective_policy, prov_name=_pname,
+                relay_force_model=_rfm if not _policy.force_model_override else None,
+                relay_models=_rm or [],
                 relay_thinking=_rt, shim_mode=SHIM_MODE,
                 nonce_factory=lambda: f"{id(areq) & 0xffffff:x}",
             )
@@ -1263,7 +1288,7 @@ if __name__ == "__main__":
             pkey = p_entry.get("api_key", "")
             pol = provider_policy.policy_from_prov(prov)
             MULTI_REGISTRY[pfx] = {
-                "prov": prov, "key": pkey, "prov_name": tpl_id,
+                "prov": prov, "key": pkey, "prov_name": adapter,
                 "policy": pol, "relay_force_model": rfm,
                 "relay_models": [], "relay_thinking": None,
             }
